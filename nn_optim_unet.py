@@ -574,6 +574,10 @@ class nn_builder(nn.Module):
             print(f'\n=== Fold {fold + 1}/{k_folds} ===')
             print(f'Train samples: {len(train_idx)}, Test samples: {len(test_idx)}')
 
+            # Save the train and test indices
+            np.save(f'{fold_output_path}train_idx_fold_{fold}.npy', train_idx)
+            np.save(f'{fold_output_path}test_idx_fold_{fold}.npy', test_idx)
+
             # Reset model by loading initial state
             self.model.load_state_dict(init_state)
             self.model.to(device)
