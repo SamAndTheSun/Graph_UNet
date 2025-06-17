@@ -183,32 +183,33 @@ def bias_correction(chr_ages, pred_per_vertex, factors=None, method='behesti'):
     return corrected_e, corrected_age_gap, factors
 
 # Function for plotting global age gaps
-def age_gap_plot(age_gaps, output_dir, suffix):
+def age_gap_plot(age_gaps, output_dir, suffix, min_x=-20, max_x=20):
 
-    # Set style
-    sns.set_style("whitegrid")
+    # Set style and limits
+    sns.set_style("white")
+    plt.xlim(min_x, max_x)
+    
+    # Set font sizes
+    title_fontsize = 14
+    label_fontsize = 14
+    
+    # Show the distribution of age gaps [Global: BA-CA] with KDE only
+    sns.kdeplot(age_gaps, color='blue', alpha=0.5, linewidth=2, fill=True)
 
-    # Show the distribution of age gaps [Global: BA-CA]
-    sns.histplot(age_gaps, element='step', kde=False, edgecolor='none', color='blue')
-
-    # Compute statistics
-    mean = np.mean(age_gaps)
-    median = np.median(age_gaps)
-    std = np.std(age_gaps)
-    var = np.var(age_gaps)
-
-    # Plot labelling
+    # Plot labelling with larger fonts
+    """
     if 'corrected' in output_dir:
-        plt.title("Corrected Global Age Gap (BA' - CA)")
+        plt.title("Corrected Global Age Gap (BA' - CA)", fontsize=title_fontsize)
     else:
-        plt.title("Global Age Gap (BA - CA)")
-    plt.xlabel("Age Gap"); plt.ylabel("Count")
+        plt.title("Global Age Gap (BA - CA)", fontsize=title_fontsize)
+    """
+    plt.xlabel("Age Gap", fontsize=label_fontsize)
+    plt.ylabel("Density", fontsize=label_fontsize)
 
     # Format statistics, save plot, clear figure, and return
-    stats_text = f"Mean: {mean:.2f}\nMedian: {median:.2f}\nStd Dev: {std:.2f}\nVariance: {var:.2f}"
-    plt.legend([stats_text], loc='upper right', frameon=True, handlelength=0, handletextpad=0)
     plt.savefig(f"{output_dir}{suffix}_age_gaps.png", dpi=300, bbox_inches='tight')
-    #print(f"Saved {output_dir}{suffix}_age_gaps.png")
+    print(f'Saved Figure: {output_dir}{suffix}_age_gaps.png')
+    print(f'Figure stats: mean = {np.mean(age_gaps)} ; median = {np.median(age_gaps)} ; std = {np.std(age_gaps)} ; var = {np.var(age_gaps)}')
     plt.clf()
 
     return
