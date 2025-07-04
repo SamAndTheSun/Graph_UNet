@@ -20,307 +20,456 @@ import nibabel as nib
 # Statistical third-party imports
 import scipy.io
 from scipy.stats import skew
+from statsmodels.stats.multitest import multipletests
 import scipy.sparse as sparse
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from sklearn.linear_model import Ridge
 
 # PYG imports
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-# Function for saving per_node_mae as MATLAB files for post-processing, averaged by label
-def get_matlab(per_node_values, output_prefix=None, first='rh'):
-    '''
-    Save per-node data as MATLAB files, per ico
-    '''
+# Class for post-processing after model testing
+class postprocess():
+    def __init__(self, first='rh', suffix='temp',
+                 fsavg_path=f'/mnt/md0/softwares/freesurfer/subjects/fsaverage6/', 
+                 output_dir='/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/last_model_outputs/'):
+
+        self.first = first
+        self.suffix = suffix
+        self.fsavg_path = fsavg_path
+        self.output_dir = output_dir
+
+    # Get the FreeSurfer labels and names
+    def get_labels(self):    
+        
+        # Get label data        
+        rh_labels, rh_ctab, rh_names = nib.freesurfer.read_annot(f'{self.fsavg_path}label/rh.aparc.a2009s.annot')
+        lh_labels, lh_ctab, lh_names = nib.freesurfer.read_annot(f'{self.fsavg_path}label/lh.aparc.a2009s.annot')
+
+        # Combine hemispheres with tracking
+        if self.first == 'rh':
+            labels = np.hstack((rh_labels, lh_labels + rh_labels.max() + 1))
+            names = [(n.decode('utf-8'), 'rh') for n in rh_names] + [(n.decode('utf-8'), 'lh') for n in lh_names]
+            ctab = np.vstack((rh_ctab, lh_ctab))  # concatenate color tables
+        else:
+            labels = np.hstack((lh_labels, rh_labels + lh_labels.max() + 1))
+            names = [(n.decode('utf-8'), 'lh') for n in lh_names] + [(n.decode('utf-8'), 'rh') for n in rh_names]
+            ctab = np.vstack((lh_ctab, rh_ctab))
+
+        self.labels = labels
+        self.names = names
+        self.ctab = ctab
+        return
+    
+    # Remove the medial wall from mesh data
+    def remove_medial_wall(self, pred_per_vertex):
+
+        if not hasattr(self, 'labels'):
+            self.get_labels()
+
+        medial_labels = {'Unknown', 'Medial_wall', '???'}
+        medial_indices = [i for i, (name, _) in enumerate(self.names) if name in medial_labels]
+
+        # These are the actual integer label values used in `self.labels`
+        medial_label_vals = set(self.ctab[medial_indices, -1])  # last column is the label code
+
+        # Create cortex mask
+        cortex_mask = ~np.isin(self.labels, list(medial_label_vals))
+        pred_per_vertex_masked = pred_per_vertex[:, cortex_mask]
+
+        return pred_per_vertex_masked, cortex_mask
+        
+    # Smooth the vertex data; helps to remove model artifact
+    def smooth_vertex_data(self, pred_per_vertex, chr_ages, mask, n_iter=4, hops=2):
+
+        _, faces = nib.freesurfer.read_geometry(f'{self.fsavg_path}surf/rh.pial')
+        faces = np.vstack((faces, faces + (np.max(faces) + 1)))
+        full_n_verts = faces.max() + 1
+
+        if mask is None:
+            raise ValueError("Must provide `mask` to remove medial wall influence.")
+
+        # Use only faces that are fully cortical
+        valid_faces = np.all(mask[faces], axis=1)
+        faces = faces[valid_faces]
+
+        # Reindex vertices to cortex-only indices using fancy indexing
+        cortex_indices = np.where(mask)[0]
+        index_map = -np.ones(full_n_verts, dtype=int)
+        index_map[cortex_indices] = np.arange(cortex_indices.size)
+        faces = index_map[faces]  # remap face indices
+        n_verts = cortex_indices.size
+
+        # Fast adjacency construction
+        row = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
+        col = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
+        data = np.ones(len(row), dtype=np.float32)
+        adj = sparse.coo_matrix((data, (row, col)), shape=(n_verts, n_verts)).tocsr()
+        adj = adj.maximum(adj.T)
+
+        # Build multi-hop smoothing operator using matrix power
+        if hops > 1:
+            neighborhood = adj.copy()
+            for _ in range(hops - 1):
+                neighborhood = neighborhood @ adj
+            neighborhood = neighborhood + sparse.eye(n_verts)
+        else:
+            neighborhood = adj + sparse.eye(n_verts)
+
+        # Normalize
+        deg = np.array(neighborhood.sum(axis=1)).ravel()
+        smoothing_op = sparse.diags(1.0 / deg) @ neighborhood
+
+        # Efficient smoothing loop (still iterative but vectorized)
+        smoothed_pred = pred_per_vertex.copy()
+        for _ in range(n_iter):
+            smoothed_pred = smoothed_pred @ smoothing_op.T
+
+        # Outputs
+        vertex_means = np.mean(smoothed_pred, axis=1)
+        age_gaps = vertex_means - chr_ages
+        per_node_e = np.mean(smoothed_pred - chr_ages[:, None], axis=0)
+
+        return smoothed_pred, age_gaps, per_node_e
+        
+    # Save plot showing distribution of global age gapes
+    def age_gap_plot(self, age_gaps, output_path, min_x=-20, max_x=20):
+        
+        # Update output path if relevant
+        if not output_path.endswith('.png'): output_path += '.png'
+
+        # Set style and limits
+        sns.set_style("white")
+        plt.xlim(min_x, max_x)
+
+        # Set font sizes
+        title_fontsize = 14
+        label_fontsize = 14
+
+        # Show the distribution of age gaps [Global: BA-CA] with KDE only
+        sns.kdeplot(age_gaps, color='blue', alpha=0.5, linewidth=2, fill=True)
+
+        # Plot labelling with larger fonts
+        """
+        if 'corrected' in output_dir:
+            plt.title("Corrected Global Age Gap (BA' - CA)", fontsize=title_fontsize)
+        else:
+            plt.title("Global Age Gap (BA - CA)", fontsize=title_fontsize)
+        """
+        plt.xlabel("Age Gap", fontsize=label_fontsize)
+        plt.ylabel("Density", fontsize=label_fontsize)
+
+        # Format statistics, save plot, clear figure, and return
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f'Saved Figure: {output_path}')
+        print(f'Figure stats: mean = {np.mean(age_gaps)} ; median = {np.median(age_gaps)} ; std = {np.std(age_gaps)} ; var = {np.var(age_gaps)}')
+        plt.clf()
+
+        return
+ 
+    # Account for model bias using correction methods
+    def bias_correction(self, chr_ages, pred_per_vertex, factors=None, method='behesti'):
+
+        # Input validation
+        assert len(chr_ages) == pred_per_vertex.shape[0], "Mismatch in number of subjects"
+        chr_ages_reshaped = chr_ages[:, np.newaxis]  # For broadcasting
+
+        # Design matrix for linear regression (n_subjects, 2)
+        X = np.column_stack([chr_ages, np.ones_like(chr_ages)])
+        
+        if method == 'behesti': # Behesti et al., 2019
+
+            if factors is None:
+
+                # Vectorized computation of age gap (n_subjects, n_vertices)
+                age_gap = pred_per_vertex - chr_ages_reshaped
                 
-    # Put left hemisphere first (assumed in nahian's code)
-    if first == 'rh':
-        assert len(per_node_values) % 2 == 0 # verify that there are an even number of vertices
-        half = len(per_node_values) // 2 # find the halfway point
-        right_hemisphere = per_node_values[:half] # select the first half
-        left_hemisphere = per_node_values[half:] # select the second half
-        # Concat with left hemisphere first
-        ico_vertices = np.concatenate((left_hemisphere, right_hemisphere)) # swap the halves
-    else: # if lh is already first
-        pass
-        
-    # Save to a .mat file
-    mat_filename = f"{output_prefix}.mat"
-    scipy.io.savemat(mat_filename, {'data': ico_vertices})
-        
-    #print(f"Saved {mat_filename}")
-    return
+                # Vectorized least-squares solve for all vertices (2, n_vertices)
+                coefficients, _, _, _ = np.linalg.lstsq(X, age_gap) # add an extra _ if using a newer np version
 
-# Function for masking outliers based on distribution
-def clip_outliers(arr, min_percentile=1, max_percentile=99):
-    lower_bound = np.percentile(arr, min_percentile)
-    upper_bound = np.percentile(arr, max_percentile)
-    return np.clip(arr, lower_bound, upper_bound)
+                # Get the average slope and bias
+                avg_m = np.mean(coefficients[0])
+                avg_b = np.mean(coefficients[1])
+                factors = np.array([avg_m, avg_b])
 
-# Function for getting the average error, variance, and skew per region
-def get_region_stats(per_node_e, per_node_e_corrected=None, pred_per_vertex=None, set='5cv', ico=6, first='rh', abs=True):
-
-    # Get label data
-    if ico == 7:
-        fsavg_path = '/mnt/md0/softwares/freesurfer/subjects/fsaverage/'
-    else:
-        fsavg_path = f'/mnt/md0/softwares/freesurfer/subjects/fsaverage{ico}/'
-    
-    rh_labels, _, rh_names = nib.freesurfer.read_annot(f'{fsavg_path}label/rh.aparc.a2009s.annot')
-    lh_labels, _, lh_names = nib.freesurfer.read_annot(f'{fsavg_path}label/lh.aparc.a2009s.annot')
-
-    # Combine hemispheres with tracking
-    if first == 'rh':
-        labels = np.hstack((rh_labels, lh_labels + rh_labels.max() + 1))
-        names = [(n.decode('utf-8'), 'rh') for n in rh_names] + [(n.decode('utf-8'), 'lh') for n in lh_names]
-    else:
-        labels = np.hstack((lh_labels, rh_labels + lh_labels.max() + 1))
-        names = [(n.decode('utf-8'), 'lh') for n in lh_names] + [(n.decode('utf-8'), 'rh') for n in rh_names]
-
-    unique_labels = np.unique(labels)
-    rows = []
-
-    if pred_per_vertex is None:
-        for lid in unique_labels:
-
-            # Mask for the target region
-            region_mask = (labels == lid)
-            region_name, hemi = names[lid]
+                # Print out the factors
+                print(f'Factors: {factors}')
             
-            # Get the average error, variance, and skew of the region predictions
-            error = per_node_e[region_mask].mean()
-
-            rows.append({
-                "set": set,
-                "freesurfer region": region_name,
-                "hemi": hemi,
-                "age gap": f'{error:.2f}',
-                "variance": "-",
-                "skew": "-",
-                "sort_val" : f'{error:.2f}'
-            })
-
-    else:
-        for lid in unique_labels:
-
-            # Mask for the target region
-            region_mask = (labels == lid)
-            region_name, hemi = names[lid]
-
-            # Get the average error, variance, and skew of the region predictions
-            error = per_node_e[region_mask].mean()
-            corrected_error = per_node_e_corrected[region_mask].mean()
-            var = np.var(pred_per_vertex[:, region_mask], axis=0, ddof=1).mean()
-            skew_val = skew(pred_per_vertex[:, region_mask], axis=0).mean()
-
-            rows.append({
-                "set": set,
-                "freesurfer region": region_name,
-                "hemi": hemi,
-                "age gap": f'{corrected_error:.2f} ({error:.2f})',
-                "variance": f'{var:.2f}',
-                "skew": f'{skew_val:.2f}',
-                "sort_val" : corrected_error
-            })
-
-    # Create the final DataFrame
-    if abs: df = pd.DataFrame(rows).sort_values(by="sort_val", key=lambda x: x.abs(), ascending=False).drop(columns=['sort_val'])
-    else: df = pd.DataFrame(rows).sort_values(by="sort_val", ascending=False).drop(columns=['sort_val'])
-
-    return df
-
-# Function for correcting bias based on difference between predictions and actual (semi-local bias correction)
-def bias_correction(chr_ages, pred_per_vertex, factors=None, method='behesti'):
-
-    # Input validation
-    assert len(chr_ages) == pred_per_vertex.shape[0], "Mismatch in number of subjects"
-    chr_ages_reshaped = chr_ages[:, np.newaxis]  # For broadcasting
-
-    # Design matrix for linear regression (n_subjects, 2)
-    X = np.column_stack([chr_ages, np.ones_like(chr_ages)])
-    
-    if method == 'behesti': # Behesti et al., 2019
-
-        if factors is None:
-            # Vectorized computation of age gap (n_subjects, n_vertices)
-            age_gap = pred_per_vertex - chr_ages_reshaped
+            # Apply global correction
+            all_corrected = pred_per_vertex - ((factors[0] * chr_ages_reshaped) + factors[1])
             
-            # Vectorized least-squares solve for all vertices (2, n_vertices)
-            coefficients, _, _, _ = np.linalg.lstsq(X, age_gap) # add an extra _ if using a newer np version
-
-            # Get the average slope and bias
-            avg_m = np.mean(coefficients[0])
-            avg_b = np.mean(coefficients[1])
-            factors = np.array([avg_m, avg_b])
-
-            # Print out the factors
-            print(f'Factors: {factors}')
-        
-        # Apply global correction
-        all_corrected = pred_per_vertex - ((factors[0] * chr_ages_reshaped) + factors[1])
-        
-    elif method == 'cole': # Cole et al., 2018
-        
-        if factors is None:
-
-            # Vectorized solve for all vertices
-            coefficients = np.linalg.lstsq(X, pred_per_vertex)[0]
+        elif method == 'cole': # Cole et al., 2018
             
-            # Average local slopes (m) and intercepts (b)
-            avg_m = np.mean(coefficients[0])
-            avg_b = np.mean(coefficients[1])
-            factors = np.array([avg_m, avg_b])  # Global (2,) factors
+            if factors is None:
 
-            # Print out the factors
-            print(f'Factors: {factors}')
-            
-        # Apply per-vertex correction: (pred - b)/m
-        all_corrected = (pred_per_vertex - factors[1]) / factors[0]
-    
-    # Compute errors
-    corrected_e = np.mean(all_corrected - chr_ages_reshaped, axis=0)
-    corrected_age_gap = np.mean(all_corrected, axis=1) - chr_ages
-    
-    return corrected_e, corrected_age_gap, factors
+                # Vectorized solve for all vertices
+                coefficients = np.linalg.lstsq(X, pred_per_vertex)[0]
+                
+                # Average local slopes (m) and intercepts (b)
+                avg_m = np.mean(coefficients[0])
+                avg_b = np.mean(coefficients[1])
+                factors = np.array([avg_m, avg_b])  # Global (2,) factors
 
-# Function for plotting global age gaps
-def age_gap_plot(age_gaps, output_dir, suffix, min_x=-20, max_x=20):
-
-    # Set style and limits
-    sns.set_style("white")
-    plt.xlim(min_x, max_x)
-    
-    # Set font sizes
-    title_fontsize = 14
-    label_fontsize = 14
-    
-    # Show the distribution of age gaps [Global: BA-CA] with KDE only
-    sns.kdeplot(age_gaps, color='blue', alpha=0.5, linewidth=2, fill=True)
-
-    # Plot labelling with larger fonts
-    """
-    if 'corrected' in output_dir:
-        plt.title("Corrected Global Age Gap (BA' - CA)", fontsize=title_fontsize)
-    else:
-        plt.title("Global Age Gap (BA - CA)", fontsize=title_fontsize)
-    """
-    plt.xlabel("Age Gap", fontsize=label_fontsize)
-    plt.ylabel("Density", fontsize=label_fontsize)
-
-    # Format statistics, save plot, clear figure, and return
-    plt.savefig(f"{output_dir}{suffix}_age_gaps.png", dpi=300, bbox_inches='tight')
-    print(f'Saved Figure: {output_dir}{suffix}_age_gaps.png')
-    print(f'Figure stats: mean = {np.mean(age_gaps)} ; median = {np.median(age_gaps)} ; std = {np.std(age_gaps)} ; var = {np.var(age_gaps)}')
-    plt.clf()
-
-    return
-
-# Function for smoothing out prediction values
-def smooth_vertex_data(pred_per_vertex, chr_ages, n_iter=4, hops=2, ico=6):
-
-    # 1. Smooth the mesh values
-    fsavg_path = f'/mnt/md0/softwares/freesurfer/subjects/fsaverage{ico}/'
-    _, faces = nib.freesurfer.read_geometry(f'{fsavg_path}surf/rh.pial')
-    
-    # Stack the faces to account for both hemispheres (same for each hemi)
-    faces = np.vstack((faces, faces + (np.max(faces) + 1)))
-
-    # Convert to 0-based if needed
-    if faces.min() == 1:
-        faces = faces - 1
-    n_verts = pred_per_vertex.shape[1]
-
-    # Build adjacency matrix (only once)
-    rows = np.hstack([faces[:,0], faces[:,1], faces[:,2]])
-    cols = np.hstack([faces[:,1], faces[:,2], faces[:,0]])
-    adj = sparse.csr_matrix(
-        (np.ones(len(rows)), (rows, cols)),
-        shape=(n_verts, n_verts)
-    )
-    adj = adj.maximum(adj.T)  # Ensure symmetry
-    
-    # Create multi-hop neighborhood matrix
-    neighborhood = sparse.eye(n_verts)  # Start with self-connections
-    if hops > 0:
-        hop_matrix = adj.copy()
-        for _ in range(hops-1):
-            hop_matrix = hop_matrix @ adj
-        neighborhood += hop_matrix
+                # Print out the factors
+                print(f'Factors: {factors}')
+                
+            # Apply per-vertex correction: (pred - b)/m
+            all_corrected = (pred_per_vertex - factors[1]) / factors[0]
         
-    # Normalize by degree (including self)
-    degrees = np.array(neighborhood.sum(axis=1)).ravel()
-    inv_degrees = sparse.diags(1.0 / degrees)
+        # Compute errors
+        corrected_e = np.mean(all_corrected - chr_ages_reshaped, axis=0)
+        corrected_age_gap = np.mean(all_corrected, axis=1) - chr_ages
+        
+        return corrected_e, corrected_age_gap, factors
+ 
+    # Clip array outliers based on percentile
+    def clip_outliers(self, arr, min_percentile=1, max_percentile=99):
+        lower_bound = np.percentile(arr, min_percentile)
+        upper_bound = np.percentile(arr, max_percentile)
+        return np.clip(arr, lower_bound, upper_bound)
+ 
+    # Convert arrays to matlab format
+    def get_matlab(self, per_node_values, output_path=None):
+        
+        # Update output path if relevant
+        if not output_path.endswith('.mat'): output_path += '.mat'
+        
+        # Put left hemisphere first (assumed in nahian's code)
+        if self.first == 'rh':
+            assert len(per_node_values) % 2 == 0 # verify that there are an even number of vertices
+            half = len(per_node_values) // 2 # find the halfway point
+            right_hemisphere = per_node_values[:half] # select the first half
+            left_hemisphere = per_node_values[half:] # select the second half
+            
+            # Concat with left hemisphere first
+            ico_vertices = np.concatenate((left_hemisphere, right_hemisphere)) # swap the halves
+            
+        else: # if lh is already first
+            pass
+            
+        # Save to a .mat file
+        scipy.io.savemat(output_path, {'data': ico_vertices})
+            
+        #print(f"Saved {mat_filename}")
+        return
     
-    # Create smoothing operator
-    smoothing_op = inv_degrees @ neighborhood
+    # Get statistics for all regions
+    def get_region_stats(self, per_node_e, per_node_e_corrected=None, pred_per_vertex=None, use_abs=True, 
+                            remove_medial=True, medial_labels={'Medial_wall', 'Unknown', '???'}):
+
+        # Ensure labels and names are loaded
+        if not hasattr(self, 'labels') or not hasattr(self, 'names'):
+            self.get_labels()
+            
+        unique_labels = np.unique(self.labels)
+        rows = []
+
+        if pred_per_vertex is None:
+            for lid in unique_labels:
+
+                # Mask for the target region
+                region_mask = (self.labels == lid)
+                region_name, hemi = self.names[lid]
+                
+                # Get the average error, variance, and skew of the region predictions
+                error = per_node_e[region_mask].mean()
+                
+                rows.append({
+                    "freesurfer region": region_name,
+                    "hemi": hemi,
+                    "age gap": f'{error:.2f}',
+                    "variance": "-",
+                    "skew": "-",
+                    "sort_val" : f'{error:.2f}'
+                })
+
+        else:
+            for lid in unique_labels:
+
+                # Mask for the target region
+                region_mask = (self.labels == lid)
+                region_name, hemi = self.names[lid]
+
+                # Skip medial wall
+                if remove_medial and region_name in medial_labels:
+                    continue
+
+                # Get the average error, variance, and skew of the region predictions
+                error = per_node_e[region_mask].mean()
+                corrected_error = per_node_e_corrected[region_mask].mean()
+                var = np.var(pred_per_vertex[:, region_mask], axis=0, ddof=1).mean()
+                skew_val = skew(pred_per_vertex[:, region_mask], axis=0).mean()
+
+                rows.append({
+                    "freesurfer region": region_name,
+                    "hemi": hemi,
+                    "age gap": f'{corrected_error:.2f} ({error:.2f})',
+                    "variance": f'{var:.2f}',
+                    "skew": f'{skew_val:.2f}',
+                    "sort_val" : corrected_error
+                })
+
+        # Create the final DataFrame
+        if use_abs: df = pd.DataFrame(rows).sort_values(by="sort_val", key=lambda x: x.abs(), ascending=False).drop(columns=['sort_val'])
+        else: df = pd.DataFrame(rows).sort_values(by="sort_val", ascending=False).drop(columns=['sort_val'])
+
+        return df
     
-    # Apply smoothing to each subject
-    smoothed_pred = pred_per_vertex.copy()
-    for _ in range(n_iter):
-        smoothed_pred = smoothed_pred @ smoothing_op.T
+    # Standard postprocessing line
+    def __call__(self, chr_ages, age_gaps, pred_per_vertex, factors=None, use_abs=True, abs_limits=False):
+        '''
+        Run basic post-processing, including bias correction, smoothing, and figure generation
+        '''
+        
+        # Get the anatomic labels
+        self.get_labels()
+
+        # Remove the medial wall
+        pred_per_vertex, mask = self.remove_medial_wall(pred_per_vertex)
+
+        # Smooth the predictions
+        pred_per_vertex, age_gaps, smoothed_r_e = self.smooth_vertex_data(pred_per_vertex, chr_ages, mask) # smoothed raw errors
+
+        # Show the distribution of age gaps [Global: BA-CA]
+        self.age_gap_plot(age_gaps, output_path=f'{self.output_dir}{self.suffix}_raw_age_gaps') 
+
+        # Run bias correction
+        smoothed_c_e, corrected_age_gap, factors = self.bias_correction(chr_ages, pred_per_vertex, factors) # smoothed corrected errors
+
+        # Show the distribution of age gaps [Global: BA-CA]
+        self.age_gap_plot(corrected_age_gap, output_path=f'{self.output_dir}{self.suffix}_corrected_age_gaps') 
+
+        # === Visualization === #
+
+        # Add back in the medial wall to the datafiles for visualization purposes
+        full_r_errors = np.zeros(mask.shape[0], dtype=smoothed_r_e.dtype)
+        full_r_errors[mask] = smoothed_r_e; del smoothed_r_e
+        #
+        full_c_errors = np.zeros(mask.shape[0], dtype=smoothed_c_e.dtype)
+        full_c_errors[mask] = smoothed_c_e; del smoothed_c_e
+        #
+        full_pred_per_vertex = np.zeros((pred_per_vertex.shape[0], mask.shape[0]), dtype=pred_per_vertex.dtype)
+        full_pred_per_vertex[:, mask] = pred_per_vertex; del pred_per_vertex
+
+        # Clip the errors for visualization purposes, then save the errors as matlab arrays
+        self.get_matlab(self.clip_outliers(full_r_errors), output_path=f'{self.output_dir}{self.suffix}_raw_ME_data')
+        self.get_matlab(self.clip_outliers(full_c_errors), output_path=f'{self.output_dir}{self.suffix}_corrected_ME_data')
+
+        # Convert to MATLAB cell array syntax
+        mat_files = [f'{self.output_dir}{self.suffix}_raw_ME_data', f'{self.output_dir}{self.suffix}_corrected_ME_data']
+        matlab_file_list = "{" + ",".join([f"'{f}'" for f in mat_files]) + "}"
+
+        # Run the MATLAB code
+        if abs_limits: # manual limits vs min and max limits
+            command_primary = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'lat_L','lat_R','med_R','med_L'}}, {abs_limits}); exit"]
+            command_alt = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'ant','dor','pos','ven'}}, {abs_limits}); exit"]
+        else:
+            command_primary = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'lat_L','lat_R','med_R','med_L'}}); exit"]
+            command_alt = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'ant','dor','pos','ven'}}); exit"]
+
+        result = subprocess.run(command_primary, cwd="/mnt/md0/tempFolder/samAnderson/nahian_code/", stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        #print(result)
+        result = subprocess.run(command_alt, cwd="/mnt/md0/tempFolder/samAnderson/nahian_code/", stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        #print(result)
+
+        # Specify the image paths to load
+        paths = [
+            f'{self.output_dir}{self.suffix}_raw_ME_data_latL_latR_medR_medL.png', 
+            f'{self.output_dir}{self.suffix}_raw_age_gaps.png',
+            f'{self.output_dir}{self.suffix}_corrected_ME_data_latL_latR_medR_medL.png',
+            f'{self.output_dir}{self.suffix}_corrected_age_gaps.png'
+        ]
+        
+        # Get the stats by region, retaining smoothing but ignoring clipping
+        region_stats_df = self.get_region_stats(full_r_errors, full_c_errors, full_pred_per_vertex, use_abs=use_abs)
+
+        # Return the paths of the images to plot as a list, and the regional df
+        return paths, region_stats_df, factors, full_pred_per_vertex
+
+    # Get the average error for a given region
+    def avg_region_error(self, value_per_vertex_subject, target_region, mean='by_subject'):
+
+        # Ensure labels and names are loaded
+        if not hasattr(self, 'labels'):
+            self.get_labels()
+
+        # Handle full-cortex case
+        if target_region == 'all':
+            mask = np.ones_like(self.labels, dtype=bool)
+        else:
+            mask = np.zeros_like(self.labels, dtype=bool)
+            for i, (name, _) in enumerate(self.names):
+                if target_region.lower() in name.lower():
+                    mask |= (self.labels == i)
+
+        if not np.any(mask):
+            raise ValueError(f"No vertices found for region: {target_region}")
+
+        # Average across values within the mask
+        if mean == 'by_subject': # so you get 1 value per subject
+            return np.mean(value_per_vertex_subject[:, mask], axis=1)
+        elif mean == 'by_vertice': # so you get 1 value per vertice
+            return np.mean(value_per_vertex_subject[:, mask], axis=0)
     
-    # 2. Compute age gaps (mean prediction vs chronological age)
-    vertex_means = np.mean(smoothed_pred, axis=1)
-    age_gaps = vertex_means - chr_ages
-    
-    # 3. Compute per-node errors (mean prediction error per vertex)
-    per_node_e = np.mean(smoothed_pred - chr_ages[:, np.newaxis], axis=0)
-    
-    return smoothed_pred, age_gaps, per_node_e
-
-# Function for post-processing
-def postprocess(chr_ages, age_gaps, pred_per_vertex, output_dir, suffix, factors=None, abs=True, ico=6):
-
-    # Smooth the predictions
-    pred_per_vertex, age_gaps, smoothed_e = smooth_vertex_data(pred_per_vertex, chr_ages, ico=6)
-
-    # Show the distribution of age gaps [Global: BA-CA]
-    age_gap_plot(age_gaps, output_dir, f'{suffix}_raw')
-
-    # Clip the errors for visualization purposes
-    clipped_smoothed_e = clip_outliers(smoothed_e)
-
-    # Save the smoothed, clipped error as a matlab array
-    get_matlab(clipped_smoothed_e, output_prefix=f'{output_dir}{suffix}_raw_ME_data')
-
-    # Run bias correction
-    corrected_e, corrected_age_gap, factors = bias_correction(chr_ages, pred_per_vertex, factors)
-
-    # Show the distribution of age gaps [Global: BA-CA]
-    age_gap_plot(corrected_age_gap, output_dir, f'{suffix}_corrected')
-
-    # Clip the errors for visualization purposes
-    clipped_corrected_e = clip_outliers(corrected_e)
-
-    # Save the corrected error as a matlab array
-    get_matlab(clipped_corrected_e, output_prefix=f'{output_dir}{suffix}_corrected_ME_data')
-
-    # Convert to MATLAB cell array syntax
-    mat_files = [f'{output_dir}{suffix}_raw_ME_data', f'{output_dir}{suffix}_corrected_ME_data']
-    matlab_file_list = "{" + ",".join([f"'{f}'" for f in mat_files]) + "}"
-
-    # Run the MATLAB code
-    command = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'lat_L','lat_R','med_R','med_L'}}); exit"]
-    result = subprocess.run(command, cwd="/mnt/md0/tempFolder/samAnderson/nahian_code/", stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    #print(result)
-
-    paths = [
-        f'{output_dir}{suffix}_raw_ME_data_latL_latR_medR_medL.png', 
-        f'{output_dir}{suffix}_raw_age_gaps.png',
-        f'{output_dir}{suffix}_corrected_ME_data_latL_latR_medR_medL.png',
-        f'{output_dir}{suffix}_corrected_age_gaps.png'
-    ]
-
-    # Save the alternative angles
-    command = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'ant','dor','pos','ven'}}); exit"]
-    result = subprocess.run(command, cwd="/mnt/md0/tempFolder/samAnderson/nahian_code/", stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    #print(result)
-    
-    # Get the stats by region, retaining smoothing but ignoring clipping
-    region_stats_df = get_region_stats(smoothed_e, corrected_e, pred_per_vertex, set=suffix, abs=abs)
-
-    # Return the paths of the images to plot as a list, and the regional df
-    return paths, region_stats_df, factors
-
+    # Regress anatomical qualities (from testing data) against age gap
+    def regress_region(self, X_test, error_per_vertex, groups_dict=None, target_region='G_oc-temp_med-Parahip', 
+                    feature_order=['area','curvature','sulcal_depth', 'thickness', 'white_gray_matter_intensity_ratio']): # used for all files; avoid -
+        
+        # Ensure labels and names are loaded
+        if not hasattr(self, 'labels') or not hasattr(self, 'names'):
+            self.get_labels()
+        
+        # Handle full-cortex case
+        if target_region == 'all':
+            mask = np.ones_like(self.labels, dtype=bool)
+        else:
+            # Generate region mask
+            if not hasattr(self, 'labels'):
+                self.get_labels()
+            mask = np.zeros_like(self.labels, dtype=bool)
+            for i, (name, _) in enumerate(self.names):
+                if target_region.lower() in name.lower():
+                    mask |= (self.labels == i)
+        
+        if not np.any(mask):
+            raise ValueError(f"No vertices found for region: {target_region}")
+        
+        # Compute subject-level averages within region
+        X_avg = np.mean(X_test[:, mask, :], axis=1)  # Mean features per subject
+        y_avg = self.average_error_within_region(error_per_vertex, target_region)  # Mean error per subject
+        
+        if groups_dict is None: # standard regression
+        
+            # Add intercept column
+            X_with_intercept = sm.add_constant(X_avg) # adds to front; only needed for sm.OLS not smf.ols
+            # Fit the model
+            model = sm.OLS(y_avg, X_with_intercept).fit()
+                    
+        else: # regression with interaction term
+            
+            # Build DataFrame
+            df = pd.DataFrame(X_avg, columns=feature_order)
+            df['brain_age'] = y_avg
+            # Add group variables to df
+            for group, values in groups_dict.items():
+                df[group] = values
+        
+            # For each group, create (feature1 + feature2 + ...) * group term
+            morph_str = ' + '.join(feature_order)
+            interaction_terms = [f'({morph_str}) * {g}' for g in groups_dict.keys()]
+            formula = 'brain_age ~ ' + ' + '.join(interaction_terms)
+            
+            # Fit the model
+            model = smf.ols(formula, data=df).fit()
+            
+        # Adjust the p-values
+        pvals = model.pvalues
+        _, pvals_corrected, _, _ = multipletests(pvals, alpha=0.05, method='fdr_bh')
+            
+        return model, pvals_corrected
+        
 # Function for getting dataset statistics based on what files were converted
 def get_dataset_statistics(datasets, age_filter=None):
     
@@ -517,83 +666,15 @@ def get_dataset_statistics(datasets, age_filter=None):
     
     return d_table
 
-# Function for highlighting target regions. Angle is specified within MATLAB function
-def highlight_regions(roi, ico=6, first='rh'):
-
-    # Load in the freesurfer label data
-    if ico == 7:
-        fsavg_path = '/mnt/md0/softwares/freesurfer/subjects/fsaverage/'
-    else:
-        fsavg_path = f'/mnt/md0/softwares/freesurfer/subjects/fsaverage{ico}/'
-
-    rh_labels, _, rh_names = nib.freesurfer.read_annot(f'{fsavg_path}label/rh.aparc.a2009s.annot')
-    lh_labels, _, lh_names = nib.freesurfer.read_annot(f'{fsavg_path}label/lh.aparc.a2009s.annot')
-
-    # Combine hemispheres with tracking
-    if first == 'rh':
-        labels = np.hstack((rh_labels, lh_labels + rh_labels.max() + 1))
-        names = [(n.decode('utf-8'), 'rh') for n in rh_names] + [(n.decode('utf-8'), 'lh') for n in lh_names]
-    else:
-        labels = np.hstack((lh_labels, rh_labels + lh_labels.max() + 1))
-        names = [(n.decode('utf-8'), 'lh') for n in lh_names] + [(n.decode('utf-8'), 'rh') for n in rh_names]
-
-    # Each unique label has a different value within the masked array (i.e. region 1 = 1, region 2 = 2, etc., all non-regions are 0)
-    label_values = np.zeros_like(labels)
-
-    # Find ROI indices and assign unique values
-    for roi_idx, roi_name in enumerate(roi, 1):  # Start from 1
-        print(f'Region: {roi_name}, i = {roi_idx}')
-        # Find matching labels for this ROI (checking both hemispheres)
-        roi_label_indices = []
-        for i, (name, hemi) in enumerate(names):
-            if name == roi_name:
-                roi_label_indices.append(i)
-        
-        # Set the label values for this ROI
-        for label_idx in roi_label_indices:
-            mask = labels == label_idx
-            label_values[mask] = roi_idx
-
-    """
-    print(f"Created label array with {len(roi)} ROIs")
-    print(f"ROI values: {np.unique(label_values[label_values > 0])}")
-    print(f"Total vertices: {len(label_values)}")
-    print(f"ROI vertices: {np.sum(label_values > 0)}")
-    print(f"Background vertices: {np.sum(label_values == 0)}")
-    """
-
-    # Flip hemispheres for nahian_code (which assumes left hemisphere first)
-    if first == 'rh':
-        assert len(label_values) % 2 == 0  # verify that there are an even number of vertices
-        half = len(label_values) // 2  # find the halfway point
-        right_hemisphere = label_values[:half]  # select the first half
-        left_hemisphere = label_values[half:]  # select the second half
-        # Concat with left hemisphere first
-        ico_vertices = np.concatenate((left_hemisphere, right_hemisphere))  # swap the halves
-    else:  # if lh is already first
-        ico_vertices = label_values
-
-    # Save label_values to .mat file for MATLAB
-    output_prefix = f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/last_model_outputs/all_positive_AD-CN-regions_ico{ico}'
-    mat_filename = f'{output_prefix}_labels.mat'
-
-    # Save the label values
-    scipy.io.savemat(mat_filename, {'vertex_labels': ico_vertices})
-    #print(f"Saved label values to: {mat_filename}")
-
-    # Run the MATLAB code
-    matlab_params = f"'{mat_filename}', {ico}, '{output_prefix}'"
-    command = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_rois({matlab_params}); exit"]
-    result = subprocess.run(command, cwd="/mnt/md0/tempFolder/samAnderson/nahian_code/", stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    #print(result)
-    
-    return
-
 # Function for showing the differences between two sets
 def show_ranked_differences(suffix, output_dir):
 
     # Load data and compute positive regions
     region_stats_df = pd.read_csv(f'{output_dir}{suffix}_errors.csv', index_col=0)
+
+    # Remove medial wall and non-informative regions
+    medial_labels = {"Medial_wall", "Unknown", "???"}
+    region_stats_df = region_stats_df[~region_stats_df["freesurfer region"].isin(medial_labels)]
 
     # Calculate average gap for all regions (not filtering for positive)
     all_regions = (
@@ -620,4 +701,4 @@ def show_ranked_differences(suffix, output_dir):
             f"{row['avg_gap']:>8.2f}"
             f"{row['lh']:>8.2f} "
             f"{row['rh']:>8.2f} "
-        )
+        )    

@@ -2,6 +2,7 @@
 import os
 import sys
 import glob
+import gc
 
 # Custom paths
 sys.path.append('/home/samuelA/.local/lib/python3.10/site-packages')
@@ -422,14 +423,30 @@ class nn_builder(nn.Module):
 
             for idx, batch in enumerate(loader_gnn):
 
-                # Send the batch to cuda
-                batch = batch.to(device)
+                while True:
+                    try:
+                        # Send the batch to cuda
+                        batch = batch.to(device)
+                        break
+                    except torch.cuda.OutOfMemoryError:
+                        time.sleep(0.1)
 
-                # Expand the age to fill the input/output shape
-                batch.y = torch.repeat_interleave(batch.y, repeats=self.n_vertices) # number per batch, repeated per n_vertices
+                while True:
+                    try:
+                        # Expand the age to fill the input/output shape
+                        batch.y = torch.repeat_interleave(batch.y, repeats=self.n_vertices) # number per batch, repeated per n_vertices
+                        break
+                    except torch.cuda.OutOfMemoryError:
+                        time.sleep(0.1)
 
-                # Get the model loss
-                output = model(batch)
+                while True:
+                    try:
+                        # Get the model loss
+                        output = model(batch)
+                        break
+                    except torch.cuda.OutOfMemoryError:
+                        time.sleep(0.1)
+
                 if criterion == 'variance_and_mae':
                     loss = self.variance_and_mae(output, batch.y)
                 else:
@@ -546,7 +563,8 @@ class nn_builder(nn.Module):
         return avg_mae, per_node_e, y_test, age_gaps, pred_per_vertex
 
     def single_cv(self, X, y, k_folds, batch_size, batch_load, 
-                    n_epochs, lr, print_every, criterion, weight_decay): # change later to False?
+                    n_epochs, lr, print_every, criterion, weight_decay,
+                    fold_output_path = '/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/last_model_outputs/fold_values/'):
         '''
         Perform k-fold cross validation
         '''
@@ -565,10 +583,6 @@ class nn_builder(nn.Module):
 
         # Create KFold splitter
         kf = KFold(n_splits=k_folds, shuffle=True, random_state=SEED) # Seed for determinism
-
-        # Determine where to save fold outputs too
-        # TODO implement this as a parameter that is propogated through the Class
-        fold_output_path = '/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/last_model_outputs/fold_values/'
 
         for fold, (train_idx, test_idx) in enumerate(kf.split(range(n_samples))):
             print(f'\n=== Fold {fold + 1}/{k_folds} ===')
