@@ -8,6 +8,8 @@ RAVLT percent forgetting (pace of aging paper)
 
 Each of them
 
+READ UP ON ECOG
+
 CDRSB - clinical dementia sum of boxes, interview and ask about memory, orientation, etc., lower is better, higher is worse, self-reported
 
 ADAS11, 13, q4 - similar to CDRSB. Higher scores are worse. Scored on how many errors you make on a series of cognitive questions, 11 is the standard, 13 had a few added, Q4 is selected for memory, base on chenzhong pace of aging
