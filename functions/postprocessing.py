@@ -359,7 +359,10 @@ class postprocess():
 
         # Show the distribution of age gaps [Global: BA-CA]
         self.age_gap_plot(corrected_age_gap, output_path=f'{self.output_dir}{self.suffix}_corrected_age_gaps', min_x=-global_limits, max_x=global_limits)
-        
+
+        # Save the corrected age gaps
+        np.save(f'{self.output_dir}{self.suffix}_corrected_age_gaps.npy', corrected_age_gap)
+
         # Add back in the medial wall for processing and visualization purposes (to match cortex dims)
         full_r_errors = np.zeros(mask.shape[0], dtype=smoothed_r_e.dtype)
         full_r_errors[mask] = smoothed_r_e; del smoothed_r_e

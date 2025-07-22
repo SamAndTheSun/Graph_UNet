@@ -21,6 +21,7 @@ import seaborn as sns
 import statsmodels as sm
 from statsmodels.stats.multitest import multipletests
 from scipy.stats import ttest_ind
+from scipy.spatial.distance import squareform, pdist
 
 # Suppress warnings
 warnings.filterwarnings('ignore')  # Explanation: pytorch warning when converting numpy array slice to tensor
@@ -30,7 +31,7 @@ from nn_optim_unet import *
 from postprocessing import *
 
 # Local variables
-from datasets_config import datasets
+from dataset_config import datasets
 
 # ico lvl
 ico_levels=[6, 5, 4]
@@ -72,7 +73,6 @@ y_test_CN_male = f'{data_dir}y_ADNI_CN_M.npy'
 
 batch_size = 128
 batch_load = 128
-n_pretrain_epochs = 25
 n_train_epochs = 50
 lr = 0.01 
 weight_decay = 0
