@@ -352,7 +352,6 @@ def make_npy(dataset_dir,
 
 # ======================================================================================================= #
 
-
 # ico level to start at
 ico=6
 # file types
@@ -554,41 +553,3 @@ np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/
 np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/sex_ADNI_AD', sex_ADNI_AD)
 np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/subjects_ADNI_AD', subjects_ADNI_AD)
 """
-# ======================================================================================================= #
-
-# Save the sex-specific CNs
-X_ADNI_CN_standardized = np.load(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/X_ADNI_CN.npy')
-y_ADNI_CN = np.load(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/y_ADNI_CN.npy')
-sex_ADNI_CN = np.load(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/sex_ADNI_CN.npy')
-subjects_ADNI_CN = np.load(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/subjects_ADNI_CN.npy')
-
-# Boolean masks
-male_mask = (sex_ADNI_CN == 'Male')
-female_mask = (sex_ADNI_CN == 'Female')
-
-# Males
-X_ADNI_CN_male = X_ADNI_CN_standardized[male_mask]
-y_ADNI_CN_male = y_ADNI_CN[male_mask]
-sex_ADNI_CN_male = sex_ADNI_CN[male_mask]
-subjects_ADNI_CN_male = subjects_ADNI_CN[male_mask]
-
-# Females
-X_ADNI_CN_female = X_ADNI_CN_standardized[female_mask]
-y_ADNI_CN_female = y_ADNI_CN[female_mask]
-sex_ADNI_CN_female = sex_ADNI_CN[female_mask]
-subjects_ADNI_CN_female = subjects_ADNI_CN[female_mask]
-
-# Save to files
-out_dir = '/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed'
-
-# Male files
-np.save(f'{out_dir}/X_ADNI_CN_M', X_ADNI_CN_male)
-np.save(f'{out_dir}/y_ADNI_CN_M', y_ADNI_CN_male)
-np.save(f'{out_dir}/sex_ADNI_CN_M', sex_ADNI_CN_male)
-np.save(f'{out_dir}/subjects_ADNI_CN_M', subjects_ADNI_CN_male)
-
-# Female files
-np.save(f'{out_dir}/X_ADNI_CN_F', X_ADNI_CN_female)
-np.save(f'{out_dir}/y_ADNI_CN_F', y_ADNI_CN_female)
-np.save(f'{out_dir}/sex_ADNI_CN_F', sex_ADNI_CN_female)
-np.save(f'{out_dir}/subjects_ADNI_CN_F', subjects_ADNI_CN_female)

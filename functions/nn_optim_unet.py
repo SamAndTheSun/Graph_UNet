@@ -49,57 +49,79 @@ def set_seed(seed):
     random.seed(seed)
 
 # Basic function for running the model
-def run_model(X_train, y_train, X_test, y_test, model=None,
+def run_model(X_train, y_train, X_test, y_test, model=None, mask=None,
               batch_size=32, batch_load=1, n_epochs=100, lr=0.0001, print_every=10, 
               pooling_path='/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/pooling/',
               ico_levels=[6, 5, 4], criterion='variance_and_mae', weight_decay=0.01, 
-              first='rh', intra_w=0, global_w=0, feature_scale=1, dropout_levels=[0.5, 0.5]):
-    
-    # Set seed for reproducability
+              first='rh', intra_w=0, global_w=0, feature_scale=1, dropout_levels=[0.5, 0.5],
+              verbose=True):
+    """
+    High-level wrapper for training/testing a GNN model.
+    """
+
+    # Set seed for reproducibility
     set_seed(SEED)
-    
-    # Print out model hyperparameters
-    print(f'''
-    === Model/Training Params ===\n
-    batch_size = {batch_size}
-    batch_load = {batch_load}
-    n_epochs = {n_epochs}
-    lr = {lr}
-    L2 regularization = {weight_decay}
-    intra_w = {intra_w}
-    global_w = {global_w}
-    feature_scale = {feature_scale}
-    dropout_levels = {dropout_levels}
-    ''')
 
+    # Display model/training parameters
+    if verbose:
+        print(f"""
+        === Model/Training Parameters ===
+        Batch size        : {batch_size}
+        Batch load        : {batch_load}
+        Epochs            : {n_epochs}
+        Learning rate     : {lr}
+        L2 regularization : {weight_decay}
+        Intra loss weight : {intra_w}
+        Global loss weight: {global_w}
+        Feature scale     : {feature_scale}
+        Dropout levels    : {dropout_levels}
+        """)
 
-    # Sort the ico levels in descending order (largest first)
+    # Ensure ico_levels is sorted largest to smallest
     ico_levels = sorted(ico_levels, reverse=True)
 
-    # Use MAE if specified
-    if criterion == 'mae': criterion = F.l1_loss
+    # Convert criterion string to actual function if needed
+    if criterion == 'mae':
+        criterion = F.l1_loss
 
-    # Get the GNN model then train it
-    if model == None:
-        model = get_gnn(fs=feature_scale, dropout_levels=dropout_levels, pooling_path=pooling_path, ico_levels=ico_levels)
+    # Create model if not provided
+    if model is None:
+        model = get_gnn(
+            fs=feature_scale,
+            dropout_levels=dropout_levels,
+            pooling_path=pooling_path,
+            ico_levels=ico_levels
+        )
+
+    # Build trainer
     nn_trainer = nn_builder(model)
 
-    # If training a model but not testing it
-    if X_test == None:
-        trained_model = nn_trainer(X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test, model=model,
-            batch_size=batch_size, batch_load=batch_load, n_epochs=n_epochs, 
-            lr=lr, print_every=print_every, ico_levels=ico_levels, 
-            criterion=criterion, weight_decay=weight_decay, 
-            first=first, intra_w=intra_w, global_w=global_w)
-        return trained_model
-    
-    # If testing a model, 5-fold cv, or training then testing
-    else:
-        avg_mae, per_node_e, chr_ages, age_gaps, pred_per_vertex = nn_trainer(X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test, model=model,
-            batch_size=batch_size, batch_load=batch_load, n_epochs=n_epochs, 
-            lr=lr, print_every=print_every, ico_levels=ico_levels, criterion=criterion, 
-            weight_decay=weight_decay, first=first, intra_w=intra_w, global_w=global_w)
-        return avg_mae, per_node_e, chr_ages, age_gaps, pred_per_vertex
+    # Train only
+    if X_test is None:
+        return nn_trainer(
+            X_train=X_train, y_train=y_train,
+            X_test=None, y_test=None,
+            model=model, mask=mask,
+            batch_size=batch_size, batch_load=batch_load,
+            n_epochs=n_epochs, lr=lr, print_every=print_every,
+            ico_levels=ico_levels, criterion=criterion,
+            weight_decay=weight_decay, first=first,
+            intra_w=intra_w, global_w=global_w
+        )
+
+    # Train + test or test only or CV
+    results = nn_trainer(
+        X_train=X_train, y_train=y_train,
+        X_test=X_test, y_test=y_test,
+        model=model, mask=mask,
+        batch_size=batch_size, batch_load=batch_load,
+        n_epochs=n_epochs, lr=lr, print_every=print_every,
+        ico_levels=ico_levels, criterion=criterion,
+        weight_decay=weight_decay, first=first,
+        intra_w=intra_w, global_w=global_w
+    )
+
+    return results  # tuple: (avg_mae, per_node_e, chr_ages, age_gaps, pred_per_vertex)
 
 # Define the GNN dynamically
 def get_gnn(fs=1, dropout_levels = [0.5, 0.5],
@@ -775,8 +797,18 @@ class nn_builder(nn.Module):
         total_loss = ae_loss - (global_per_vertex * self.global_w) + (label_variances * self.intra_w)
         return total_loss.mean() if mean else total_loss
 
+    def load_data(self, x_path, y_path, mask=None):
+        X = np.load(x_path).astype(np.float32)
+        y = np.load(y_path).astype(np.float32)
+        
+        if mask is not None:
+            X = X[mask]
+            y = y[mask]
+        
+        return torch.from_numpy(X), torch.from_numpy(y)
+
     def __call__(self, X_train, y_train, X_test, y_test,
-                 model=None, batch_size=32, batch_load=1, 
+                 model=None, mask=None, batch_size=32, batch_load=1, 
                  n_epochs=50, lr=0.0001, print_every=10, 
                  ico_levels=[6, 5, 4], criterion=F.l1_loss, 
                  weight_decay=0.01, first='rh',
@@ -789,12 +821,15 @@ class nn_builder(nn.Module):
         ico_dict={4:5124, 5:20484, 6:81924, 7:327684} # across both hemispheres
         self.n_vertices = ico_dict[ico_levels[0]]
 
-        # Preprocess for variance_and_mae (noted in test even if not used to train)
+        # === Preprocess for variance_and_mae (noted in test even if not used to train) ===
+
         # Get the fsavg path
         if ico_levels[0] == 7: fsavg_path = f'/mnt/md0/softwares/freesurfer/subjects/fsaverage/' # first in list should be largest
         else: fsavg_path = f'/mnt/md0/softwares/freesurfer/subjects/fsaverage{ico_levels[0]}/'
+        
         # Save relevant indices
         self.vae_preproc(fsavg_path, batch_load, first)
+
         # Store weights
         self.intra_w = intra_w
         self.global_w = global_w
@@ -806,44 +841,47 @@ class nn_builder(nn.Module):
         if model is not None: self.model = model
 
         # If testing a trained model
-        if X_train == None:
-            # Save the model and load in the data
-            X_test = torch.from_numpy(np.load(X_test).astype(np.float32)); y_test = torch.from_numpy(np.load(y_test).astype(np.float32))
-            # Test the model
-            avg_mae, per_node_e, chr_ages, age_gaps, pred_per_vertex = self.test_nn(X_test, y_test, batch_load=batch_load)
-            torch.cuda.empty_cache(); return avg_mae.cpu().numpy(), per_node_e.cpu().numpy(), chr_ages.cpu().numpy(), age_gaps.cpu().numpy(), pred_per_vertex.cpu().numpy()
-                    
-        # If training a model with no test set
-        elif y_test == None:
-            # Load in the data
-            X_train = torch.from_numpy(np.load(X_train).astype(np.float32)); y_train = torch.from_numpy(np.load(y_train).astype(np.float32))
-            # Train and return the model
-            self.model = self.train_nn(X_train, y_train, batch_size=batch_size, 
-                                            batch_load=batch_load, n_epochs=n_epochs,
-                                            lr=lr, print_every=print_every, criterion=criterion, 
-                                            weight_decay=weight_decay)
-            torch.cuda.empty_cache(); return self.model
-        
+        if X_train is None:
+            X_test, y_test = self.load_data(X_test, y_test, mask)
+            results = self.test_nn(X_test, y_test, batch_load=batch_load)
+
+        # If training a model then returning it
+        elif y_test is None:
+            X_train, y_train = self.load_data(X_train, y_train, mask)
+            self.model = self.train_nn(X_train, y_train,
+                                    batch_size=batch_size, 
+                                    batch_load=batch_load, 
+                                    n_epochs=n_epochs,
+                                    lr=lr, print_every=print_every, 
+                                    criterion=criterion,
+                                    weight_decay=weight_decay)
+            torch.cuda.empty_cache()
+            return self.model
+
         # If performing cross validation
         elif X_train == X_test:
-            # Load in the data
-            X_train = torch.from_numpy(np.load(X_train).astype(np.float32)); y_train = torch.from_numpy(np.load(y_train).astype(np.float32))
-            # Perform 5-fold cross validation
-            avg_mae, per_node_e, chr_ages, age_gaps, pred_per_vertex = self.single_cv(X=X_train, y=y_train, k_folds=5,
-                                            batch_size=batch_size, batch_load=batch_load, 
-                                            n_epochs=n_epochs, lr=lr, 
-                                            print_every=print_every, criterion=criterion, weight_decay=weight_decay)
-            torch.cuda.empty_cache(); return avg_mae.cpu().numpy(), per_node_e.cpu().numpy(), chr_ages.cpu().numpy(), age_gaps.cpu().numpy(), pred_per_vertex.cpu().numpy()
+            X_train, y_train = self.load_data(X_train, y_train, mask)
+            results = self.single_cv(X=X_train, y=y_train, k_folds=5,
+                                    batch_size=batch_size, 
+                                    batch_load=batch_load, 
+                                    n_epochs=n_epochs, lr=lr, 
+                                    print_every=print_every, 
+                                    criterion=criterion, 
+                                    weight_decay=weight_decay)
 
         # If training then testing a model
         else:
-            # Load in the data
-            X_train = torch.from_numpy(np.load(X_train).astype(np.float32)); y_train = torch.from_numpy(np.load(y_train).astype(np.float32))
-            X_test = torch.from_numpy(np.load(X_test).astype(np.float32)); y_test = torch.from_numpy(np.load(y_test).astype(np.float32))
-            # Train and test the model
-            self.model = self.train_nn(X_train, y_train, batch_size=batch_size, 
-                                            batch_load=batch_load, n_epochs=n_epochs,
-                                            lr=lr, print_every=print_every, criterion=criterion,
-                                            weight_decay=weight_decay)
-            avg_mae, per_node_e, chr_ages, age_gaps, pred_per_vertex = self.test_nn(X_test, y_test, batch_load=batch_load)
-            torch.cuda.empty_cache(); return avg_mae.cpu().numpy(), per_node_e.cpu().numpy(), chr_ages.cpu().numpy(), age_gaps.cpu().numpy(), pred_per_vertex.cpu().numpy()
+            X_train, y_train = self.load_data(X_train, y_train, mask)
+            X_test, y_test   = self.load_data(X_test, y_test, mask)
+
+            self.model = self.train_nn(X_train, y_train,
+                                    batch_size=batch_size, 
+                                    batch_load=batch_load, 
+                                    n_epochs=n_epochs,
+                                    lr=lr, print_every=print_every, 
+                                    criterion=criterion,
+                                    weight_decay=weight_decay)
+            results = self.test_nn(X_test, y_test, batch_load=batch_load)
+
+        torch.cuda.empty_cache()
+        return tuple(res.cpu().numpy() for res in results)

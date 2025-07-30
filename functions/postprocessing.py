@@ -471,8 +471,7 @@ class postprocess():
         if not hasattr(self, 'labels'):
             self.get_labels()
 
-        # Handle full-cortex case
-        if target_region == 'all':
+        if target_region == 'all': # Handle full-cortex case
             mask = (self.labels != 0) # exclude medial wall
         else:
             mask = np.zeros_like(self.labels, dtype=bool)
@@ -793,8 +792,8 @@ def show_ranked_differences(suffix, output_dir):
     return
 
 # Function for regressing through cognitive scores
-def regress_cognitive(data_dir, output_dir, cog_path='/mnt/md0/tempFolder/samAnderson/datasets/ADNI_cognitive_scores.csv', 
-                      subset=True, regions=None, postprocess_obj=None):
+def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
+                      subset=True, regions=None, postprocess_obj=None, get_beta_arrays=False):
 
     # === Prep the cognitive scores for analysis === #
 
@@ -815,11 +814,11 @@ def regress_cognitive(data_dir, output_dir, cog_path='/mnt/md0/tempFolder/samAnd
 
     # Load tests
     all_tests_with_subjects = {}
-
+    
     for cohort in ['CN', 'AD']:
         subjects = np.load(f'{data_dir}subj_IDs_ADNI_{cohort}.npy')
         subjects = subjects.astype(str)  # Ensure string format
-        
+
         matched_scores = cognitive_scores[cognitive_scores['subject_date'].isin(subjects)]
         cog_tests = matched_scores.columns.difference([
             'Subject ID', 'Sex', 'Research Group', 'Visit', 'Study Date',
@@ -849,38 +848,6 @@ def regress_cognitive(data_dir, output_dir, cog_path='/mnt/md0/tempFolder/samAnd
     CN_series = pd.Series(CN_subjects)
     AD_series = pd.Series(AD_subjects)
 
-    # Create a dictionary indicating whether higher scores are associated with better performance
-    test_relations = {
-        'ADAS11' : False,            # Alzheimer's Disease Assessment Scale - Cognitive Subscale (11 items)
-        'ADAS13' : False,            # Alzheimer's Disease Assessment Scale - 13-item version
-        'ADASQ4' : False,            # Subcomponent of ADAS
-        'CDRSB' : False,             # Clinical Dementia Rating - Sum of Boxes
-        'DIGITSCOR' : True,          # Digit Span (forward/backward) - higher = better
-        'EcogPtDivatt' : False,      # ECog Patient: Divided Attention - higher = more impairment
-        'EcogPtLang' : False,        # ECog Patient: Language
-        'EcogPtMem' : False,         # ECog Patient: Memory
-        'EcogPtOrgan' : False,       # ECog Patient: Organization
-        'EcogPtPlan' : False,        # ECog Patient: Planning
-        'EcogPtVisspat' : False,     # ECog Patient: Visuospatial
-        'EcogPtTotal': False,  # ECog Patient Total Score – higher values indicate greater self-reported cognitive impairment
-        'EcogSPDivatt' : False,      # ECog Study Partner: Divided Attention
-        'EcogSPLang' : False,        # ECog Study Partner: Language
-        'EcogSPMem' : False,         # ECog Study Partner: Memory
-        'EcogSPOrgan' : False,       # ECog Study Partner: Organization
-        'EcogSPPlan' : False,        # ECog Study Partner: Planning
-        'EcogSPTotal' : False,       # ECog Study Partner: Total Score
-        'EcogSPVisspat' : False,     # ECog Study Partner: Visuospatial
-        'FAQ' : False,               # Functional Activities Questionnaire - higher = more impairment
-        'LDELTOTAL' : True,          # Logical Memory Delayed Recall - higher = better
-        'MMSE' : True,               # Mini-Mental State Examination
-        'MOCA' : True,               # Montreal Cognitive Assessment
-        'RAVLT_forgetting' : False,  # Rey Auditory Verbal Learning Test - higher = worse retention
-        'RAVLT_immediate' : True,    # RAVLT immediate recall
-        'RAVLT_learning' : True,     # RAVLT learning score
-        'RAVLT_perc_forgetting' : False,  # Percent forgetting - higher = worse
-        'TRABSCOR' : False           # Trail Making Test Part B - Score = time, higher = worse
-    }
-
     # Determine which tests to include
     test_to_include = ['ADAS11', 'CDRSB', 'DIGITSCOR', 'EcogPtTotal', 
                     'EcogSPTotal', 'FAQ', 'LDELTOTAL', 'MMSE', 'MOCA', 
@@ -908,6 +875,9 @@ def regress_cognitive(data_dir, output_dir, cog_path='/mnt/md0/tempFolder/samAnd
 
     # Create a list to store all results for all regions and cognitive tests
     all_results = []
+    
+    # Create a dict to score all test scores for included subjects
+    all_test_scores = {}
 
     # Get the brain-age gaps for the AD and CN subjects
     brain_age_gaps = {}
@@ -950,7 +920,10 @@ def regress_cognitive(data_dir, output_dir, cog_path='/mnt/md0/tempFolder/samAnd
         # Z-score normalize the test scores and education (sex is categorical)
         education = (education - np.mean(education)) / np.std(education)
         test_scores = (test_scores - np.mean(test_scores)) / np.std(test_scores)
-
+        
+        # Save the test scores
+        all_test_scores[test] = test_scores
+        
         # Create the collective X array
         X = np.column_stack((sex, education, test_scores, chr_age))
         X_df = pd.DataFrame(X, columns=['sex', 'education', 'test_score', 'chronological_age'])
@@ -973,7 +946,8 @@ def regress_cognitive(data_dir, output_dir, cog_path='/mnt/md0/tempFolder/samAnd
                 # Append the results
                 all_results.append({
                     'cohort': test[-2:],
-                    'test' : test[:-3],
+                    'test' : f"{'-' if test_relations[test[:-3]] else ''}{test[:-3]}",
+                    'n_subjects' : len(y),
                     'test_n_subjects': f'{test[:-3]}\n(n={len(y)})',
                     'region': region,
                     'coef': results.params['test_score'],
@@ -1019,5 +993,51 @@ def regress_cognitive(data_dir, output_dir, cog_path='/mnt/md0/tempFolder/samAnd
         all_results
         .groupby(['test', 'cohort'])['raw_pval']
         .transform(lambda p: multipletests(p, alpha=0.05, method='fdr_bh')[1]))
+        
+    if not get_beta_arrays: return all_results, all_test_scores
+    
+    # Get arrays for each cognitive test, populated per vertex
+    else:
+        
+        # Create a dict to hold all cognitive test arrays
+        all_cog_arrays = {}
 
-    return all_results
+        # Get the names and labels
+        labels, names, _ = postprocess().get_labels()
+
+        # Map region names (lowercase) -> label index, for both hemispheres combined
+        region_to_label_indices = {name.lower(): i for i, (name, hemi) in enumerate(names)}
+
+        # Get a list of all cognitive tests
+        tests = all_results['test'].unique()
+
+        # Iterate through the test results
+        for cohort in ['CN', 'AD']:
+        
+            # Select the results for a given cohort
+            cohort_results = all_results[all_results['cohort'] == cohort]
+
+            # Iterate through the tests
+            for test_name in tests:
+            
+                # Select results for a given test
+                test_results = cohort_results[cohort_results['test'] == test_name] # select results for a given test
+                if (test_results['coef'] == 0).all(): continue # if all values = 0, skip this cognitive test
+                region_values = dict(zip(test_results['region'].str.lower(), test_results['coef'])) # get the values for each region
+
+                # Create an array of shape (n_vertices,) to display the values
+                display_array = np.zeros_like(labels, dtype=np.float64)
+
+                # Iterate over the region-hemisphere combinations, and re-populate vertices based on the label mean
+                for (region_name, hemi) in names:
+                    region_key = region_name.lower()
+                    if region_key in region_values:
+                        label_index = region_to_label_indices[region_key]
+                        display_array[labels == label_index] = region_values[region_key]
+
+                # If the array is not just 0s
+                if not np.all(display_array == 0): 
+                    all_cog_arrays[f'{test_name}_{cohort}'] = display_array
+
+    return all_results, all_cog_arrays, all_test_scores
+    
