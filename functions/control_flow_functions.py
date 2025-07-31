@@ -317,7 +317,7 @@ def compare_age_gaps(cohort_one, label_one, cohort_two, label_two, x_step=2.5): 
     plt.tight_layout()
     return plt
 
-def display_top_regions(df, top=3):
+def display_top_regions(df, to_rank='age_gap', top=3):
 
     # Filter the df
     filtered_df = df[df['adj_pval'] < 0.05]
@@ -334,17 +334,16 @@ def display_top_regions(df, top=3):
 
     # Select all rows from both hemispheres for those regions
     top_df = df[df['region'].isin(top_regions)]
-
     # Create new column: 'age_gap_L' or 'age_gap_R' from 'age_gap' and 'hemi'
-    top_df[f'age_gap_{top_df.hemi.iloc[0]}'] = top_df['age_gap']  # quick hack for warning avoidance
+    top_df[f'{to_rank}_{top_df.hemi.iloc[0]}'] = top_df[to_rank]  # quick hack for warning avoidance
     top_df = top_df.assign(**{
-        f'age_gap_{hemi}': top_df[top_df['hemi'] == hemi]['age_gap']
+        f'{to_rank}_{hemi}': top_df[top_df['hemi'] == hemi][to_rank]
         for hemi in ['L', 'R']
     })
 
     # Pivot to get one row per region, with both hemispheres' age gaps
-    pivoted = top_df.pivot(index='region', columns='hemi', values='age_gap').reset_index()
-    pivoted.columns = ['region', 'age_gap_L', 'age_gap_R']
+    pivoted = top_df.pivot(index='region', columns='hemi', values=to_rank).reset_index()
+    pivoted.columns = ['region', f'{to_rank}_L', f'{to_rank}_R']
 
     # Merge back region_avg and adj_pval from original filtered_df (just once per region)
     meta = (
@@ -357,7 +356,7 @@ def display_top_regions(df, top=3):
     final = pd.merge(pivoted, meta, on='region')
 
     # Display with desired column order
-    column_order = ['region', 'age_gap_L', 'age_gap_R', 'region_avg', 'adj_pval']
+    column_order = ['region', f'{to_rank}_L', f'{to_rank}_R', 'region_avg', 'adj_pval']
     final = final.reindex(final['region_avg'].abs().sort_values(ascending=False).index)
     final['adj_pval'] = final['adj_pval'].apply(lambda x: f"{x:.2e}")
     display(final[column_order].style.hide(axis='index'))

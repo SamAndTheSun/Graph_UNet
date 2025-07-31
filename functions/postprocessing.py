@@ -442,10 +442,10 @@ class postprocess():
 
         # Run the MATLAB code
         if abs_limits is not None: # manual limits vs min and max limits
-            command_primary = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'lat_L','lat_R','med_R','med_L'}}, {abs_limits}); exit"]
+            command_primary = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'lat_L','lat_R','med_R','med_L'}}, {abs_limits}, false); exit"]
             command_alt = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'ant','dor','pos','ven'}}, {abs_limits}); exit"]
         else:
-            command_primary = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'lat_L','lat_R','med_R','med_L'}}); exit"]
+            command_primary = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'lat_L','lat_R','med_R','med_L'}}, [], false); exit"]
             command_alt = ["matlab", "-nodisplay", "-nosplash", "-r", f"generate_brain({matlab_file_list}, {{'ant','dor','pos','ven'}}); exit"]
 
         result = subprocess.run(command_primary, cwd="/mnt/md0/tempFolder/samAnderson/nahian_code/", stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -465,28 +465,31 @@ class postprocess():
         return paths, region_stats_df, full_pred_per_vertex, factors
 
     # Get the average error for a given region
-    def avg_region_error(self, value_per_vertex_subject, target_region, mean='by_subject'):
+    def avg_region_error(self, value_per_vertex_subject, target_region, hemi=None, mean='by_subject'):
 
         # Ensure labels and names are loaded
         if not hasattr(self, 'labels'):
             self.get_labels()
 
-        if target_region == 'all': # Handle full-cortex case
-            mask = (self.labels != 0) # exclude medial wall
+        if target_region == 'all':
+            mask = (self.labels != 0)  # Exclude medial wall
         else:
+            if hemi == None:
+                raise Exception('Error: Hemisphere must be included for local error compuation')
             mask = np.zeros_like(self.labels, dtype=bool)
-            for i, (name, _) in enumerate(self.names):
-                if target_region.lower() in name.lower():
+            for i, (name, region_hemi) in enumerate(self.names):
+                if target_region.lower() in name.lower() and hemi == region_hemi:
                     mask |= (self.labels == i)
 
         if not np.any(mask):
-            raise ValueError(f"No vertices found for region: {target_region}")
+            raise ValueError(f"No vertices found for region '{target_region}' in hemisphere '{hemi}'")
 
-        # Average across values within the mask
-        if mean == 'by_subject': # so you get 1 value per subject
+        if mean == 'by_subject':
             return np.mean(value_per_vertex_subject[:, mask], axis=1)
-        elif mean == 'by_vertice': # so you get 1 value per vertice
+        elif mean == 'by_vertice':
             return np.mean(value_per_vertex_subject[:, mask], axis=0)
+        else:
+            raise ValueError(f"Unknown mean method: {mean}")
     
     # Regress anatomical qualities (from testing data) against age gap
     def regress_region(self, X_test, error_per_vertex, groups_dict=None, target_region='G_oc-temp_med-Parahip', 
@@ -803,8 +806,7 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
     # Combine PTID and scan date
     cognitive_scores['subject_date'] = (
         cognitive_scores['PTID'] + "_" +
-        pd.to_datetime(cognitive_scores['EXAMDATE'], format='%m/%d/%Y').dt.strftime('%Y%m%d')
-    )
+        pd.to_datetime(cognitive_scores['EXAMDATE'], format='%m/%d/%Y').dt.strftime('%Y%m%d'))
 
     # Remove values = 300 for TRABSCOR (max time limit, might distort results)
     trabscor_mask = cognitive_scores['TRABSCOR'] == 300 # create a mask
@@ -936,35 +938,43 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
             
             for region in regions.keys():
 
-                # Average the brain-age predictions across the vertices of the associated region
-                y = postprocess().avg_region_error(y, region)
+                if region == 'all':
+                    # Average the brain-age predictions across the vertices of the associated region
+                    y_region = postprocess().avg_region_error(y, region)
+                    region_val = region
+                    hemi_val = None
+                else:
+                    y_region = postprocess().avg_region_error(y, region[0], region[1]) # Format: [region, hemi]
+                    region_val = region[0]
+                    hemi_val = region[1]
                     
                 # Regress the cognitive scores with BA, CA, sex, and education
-                cognitive_regression = sm.OLS(y, sm.add_constant(X_df)) # need to manually add constant for statsmodels
+                cognitive_regression = sm.OLS(y_region, sm.add_constant(X_df)) # need to manually add constant for statsmodels
                 results = cognitive_regression.fit()
                 
                 # Append the results
                 all_results.append({
-                    'cohort': test[-2:],
-                    'test' : f"{'-' if test_relations[test[:-3]] else ''}{test[:-3]}",
-                    'n_subjects' : len(y),
-                    'test_n_subjects': f'{test[:-3]}\n(n={len(y)})',
-                    'region': region,
+                    'cohort': cohort,
+                    'test': test_name,
+                    'test_n_subjects': f'{test_name}\n(n={len(y_region)})',
+                    'region': region_val,
+                    'hemi': hemi_val,
                     'coef': results.params['test_score'],
                     'raw_pval': results.pvalues['test_score'],
-                    'is_inverted': test_relations[test[:-3]]
+                    'r_squared' : results.rsquared,
+                    'is_inverted': test_relations[test_name]
                 })
 
         else: # If using every region
 
             _, names, _ = postprocess_obj.get_labels() # get the labels, etc.
-            for region_name, hemisphere in names:
+            for region_name, hemi in names:
 
                 if region_name.lower() in ['unknown', 'medialwall']:
                     continue
 
                 # Average across the region, then regress
-                y_region = postprocess_obj.avg_region_error(y, region_name, mean='by_subject')
+                y_region = postprocess_obj.avg_region_error(y, region_name, hemi, mean='by_subject')
                 cognitive_regression = sm.OLS(y_region, sm.add_constant(X_df))
                 results = cognitive_regression.fit()
 
@@ -974,9 +984,10 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
                     'test': test_name,
                     'test_n_subjects': f'{test_name}\n(n={len(y_region)})',
                     'region': region_name,
-                    'hemi': hemisphere,
+                    'hemi': hemi,
                     'coef': results.params['test_score'],
                     'raw_pval': results.pvalues['test_score'],
+                    'r_squared' : results.rsquared,
                     'is_inverted': test_relations[test_name]
                 })
 
@@ -993,6 +1004,11 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
         all_results
         .groupby(['test', 'cohort'])['raw_pval']
         .transform(lambda p: multipletests(p, alpha=0.05, method='fdr_bh')[1]))
+    
+    # Get the regional averages
+    all_results['region_avg'] = (
+        all_results.groupby(['cohort', 'region', 'test'])['coef']
+        .transform('mean'))
         
     if not get_beta_arrays: return all_results, all_test_scores
     
@@ -1006,7 +1022,8 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
         labels, names, _ = postprocess().get_labels()
 
         # Map region names (lowercase) -> label index, for both hemispheres combined
-        region_to_label_indices = {name.lower(): i for i, (name, hemi) in enumerate(names)}
+        region_to_label_indices = {(name.lower(), hemi): i for i, 
+                                   (name, hemi) in enumerate(names)}
 
         # Get a list of all cognitive tests
         tests = all_results['test'].unique()
@@ -1023,21 +1040,36 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
                 # Select results for a given test
                 test_results = cohort_results[cohort_results['test'] == test_name] # select results for a given test
                 if (test_results['coef'] == 0).all(): continue # if all values = 0, skip this cognitive test
-                region_values = dict(zip(test_results['region'].str.lower(), test_results['coef'])) # get the values for each region
+
+                # Get the values for each region
+                region_values = {
+                    (row['region'].lower(), row.get('hemi', '')): row['coef']
+                    for _, row in test_results.iterrows()}
 
                 # Create an array of shape (n_vertices,) to display the values
                 display_array = np.zeros_like(labels, dtype=np.float64)
 
                 # Iterate over the region-hemisphere combinations, and re-populate vertices based on the label mean
                 for (region_name, hemi) in names:
-                    region_key = region_name.lower()
+                    region_key = (region_name.lower(), hemi)
                     if region_key in region_values:
-                        label_index = region_to_label_indices[region_key]
-                        display_array[labels == label_index] = region_values[region_key]
 
-                # If the array is not just 0s
-                if not np.all(display_array == 0): 
-                    all_cog_arrays[f'{test_name}_{cohort}'] = display_array
+                        # Select the specific adjusted p value
+                        adj_p = all_results.loc[
+                            (all_results['region'].str.lower() == region_name.lower()) &
+                            (all_results['hemi'].str.lower() == hemi.lower()) &
+                            (all_results['cohort'].str.lower() == cohort.lower()) &
+                            (all_results['test'].str.lower() == test_name.lower()),
+                            'adj_pval'].values[0]
+
+                        # If significant, fill in the values
+                        if adj_p < 0.05:
+                            label_index = region_to_label_indices[region_key]
+                            display_array[labels == label_index] = region_values[region_key]
+
+                    # If the array is not just 0s
+                    if not np.all(display_array == 0): 
+                        all_cog_arrays[f'{test_name}_{cohort}'] = display_array
 
     return all_results, all_cog_arrays, all_test_scores
     
