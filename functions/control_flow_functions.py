@@ -123,6 +123,9 @@ def compare_cohorts(suffix, cohort_pred, cohort_ref, mask=None, mask_split=None,
     # Difference in brain-age gaps
     cohort_diff = ME_cohort_pred - ME_cohort_ref
 
+    # Save this difference
+    np.save(f'{output_dir}{suffix}_processed_ME_data', cohort_diff); # not 'corrected' because it may also include bootstrapping
+
     # Get region labels
     labels, names, ctab = p.get_labels()
     unique_labels = np.unique(labels)
