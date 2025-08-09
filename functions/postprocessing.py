@@ -798,7 +798,7 @@ def show_ranked_differences(suffix, output_dir):
 def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
                       subset=True, regions=None, postprocess_obj=None, 
                       covariate_test=None, get_beta_arrays=False,
-                      mask_by='adjusted'):
+                      mask_by='adjusted', pval_thresh=0.05):
 
     # === Prep the cognitive scores ===
     cognitive_scores = pd.read_csv(cog_path)
@@ -927,10 +927,6 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
 
         assert len(X_df) == len(y)
 
-        ### Downsample HERE ###
-
-        ### ###
-
         # === Run regressions ===
         if subset:
             for region in regions.keys():
@@ -984,6 +980,10 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
         all_results.groupby(['cohort', 'region', 'test'])['coef']
         .transform('mean')
     )
+    
+    # Drop the medial wall if present
+    try: all_results = all_results[all_results['region'] != 'Medial_wall']
+    except KeyError: pass
 
     # Adjust the pvalues
     all_results['adj_pval'] = (
@@ -1030,7 +1030,7 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
                         p = 0  # No masking
 
                     # Apply mask if significant
-                    if p < 0.05:
+                    if p < pval_thresh:
                         label_index = region_to_label_indices[region_key]
                         display_array[labels == label_index] = region_values[region_key]
 
