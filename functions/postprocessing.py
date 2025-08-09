@@ -796,163 +796,152 @@ def show_ranked_differences(suffix, output_dir):
 
 # Function for regressing through cognitive scores
 def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
-                      subset=True, regions=None, postprocess_obj=None, get_beta_arrays=False):
+                      subset=True, regions=None, postprocess_obj=None, 
+                      covariate_test=None, get_beta_arrays=False,
+                      mask_by='adjusted'):
 
-    # === Prep the cognitive scores for analysis === #
-
-    # Load cognitive scores
+    # === Prep the cognitive scores ===
     cognitive_scores = pd.read_csv(cog_path)
 
     # Combine PTID and scan date
     cognitive_scores['subject_date'] = (
         cognitive_scores['PTID'] + "_" +
-        pd.to_datetime(cognitive_scores['EXAMDATE'], format='%m/%d/%Y').dt.strftime('%Y%m%d'))
+        pd.to_datetime(cognitive_scores['EXAMDATE'], format='%m/%d/%Y').dt.strftime('%Y%m%d')
+    )
 
-    # Remove values = 300 for TRABSCOR (max time limit, might distort results)
-    trabscor_mask = cognitive_scores['TRABSCOR'] == 300 # create a mask
-    cognitive_scores.loc[trabscor_mask, 'TRABSCOR'] = np.nan
+    # Replace TRABSCOR=300 with NaN
+    trabscor_mask = cognitive_scores['TRABSCOR'] == 300
+    cognitive_scores.loc[trabscor_mask, 'TRABSCOR'] = np.nan    
 
-    # === Custom test modifications === #
-
-    # Load tests
+    # === Load available tests per cohort ===
     all_tests_with_subjects = {}
-    
     for cohort in ['CN', 'AD']:
-        subjects = np.load(f'{data_dir}subj_IDs_ADNI_{cohort}.npy')
-        subjects = subjects.astype(str)  # Ensure string format
-
+        subjects = np.load(f'{data_dir}subj_IDs_ADNI_{cohort}.npy').astype(str)
         matched_scores = cognitive_scores[cognitive_scores['subject_date'].isin(subjects)]
         cog_tests = matched_scores.columns.difference([
             'Subject ID', 'Sex', 'Research Group', 'Visit', 'Study Date',
             'Age', 'Modality', 'Description', 'Image ID', 'subject_date'
         ])
-
         for test in cog_tests:
             key = f'{test}_{cohort}'
             valid_subjects = matched_scores.loc[matched_scores[test].notna(), 'subject_date'].astype(str).tolist()
             all_tests_with_subjects[key] = valid_subjects
 
-    # Load full subject lists
-    CN_subjects = np.load(f'{data_dir}subj_IDs_ADNI_CN.npy')
-    CN_subjects = np.array([s.strip() for s in CN_subjects.astype(str)])
-
-    AD_subjects = np.load(f'{data_dir}subj_IDs_ADNI_AD.npy')
-    AD_subjects = np.array([s.strip() for s in AD_subjects.astype(str)])
-
-    # Load chronological ages
+    # Load subject pools & ages
+    CN_subjects = np.array([s.strip() for s in np.load(f'{data_dir}subj_IDs_ADNI_CN.npy').astype(str)])
+    AD_subjects = np.array([s.strip() for s in np.load(f'{data_dir}subj_IDs_ADNI_AD.npy').astype(str)])
     CN_ages = np.load(f'{data_dir}y_ADNI_CN.npy')
     AD_ages = np.load(f'{data_dir}y_ADNI_AD.npy')
 
-    # Compute indices for each test and cohort
-    indices = defaultdict(list) # dict that defaults to a list
-
-    # Convert subject pools to pandas Series for fast isin checks
+    # Map test -> indices
+    indices = defaultdict(list)
     CN_series = pd.Series(CN_subjects)
     AD_series = pd.Series(AD_subjects)
 
-    # Determine which tests to include
     test_to_include = ['ADAS11', 'CDRSB', 'DIGITSCOR', 'EcogPtTotal', 
-                    'EcogSPTotal', 'FAQ', 'LDELTOTAL', 'MMSE', 'MOCA', 
-                    'RAVLT_immediate', 'RAVLT_learning', 'RAVLT_perc_forgetting', 
-                    'TRABSCOR']
+                       'EcogSPTotal', 'FAQ', 'LDELTOTAL', 'MMSE', 'MOCA', 
+                       'RAVLT_immediate', 'RAVLT_learning', 'RAVLT_perc_forgetting', 
+                       'TRABSCOR']
 
     for test_key, subject_dates in all_tests_with_subjects.items():
-
-        # Skip excluded tests and irrelevant columns
-        if test_key[:-3] not in test_to_include: continue
-
-        # Isolate the cohort
+        if test_key[:-3] not in test_to_include:
+            continue
         cohort = test_key[-2:]
-        
-        # Choose appropriate subject pool
         subject_series = CN_series if cohort == 'CN' else AD_series
-        
-        # Compute boolean mask for matching subjects
         mask = subject_series.isin(subject_dates)
-        
-        # Save indices of matched subjects
         indices[test_key] = mask[mask].index.tolist()
 
-    # ======= Iterate over the cohorts and match the brain age gaps to the participant cognitive scores ======= #
+    # === Load brain age gaps ===
+    brain_age_gaps = {
+        'CN': np.load(f'{output_dir}test_CN_processed_pred_per_vertex.npy') - CN_ages[:, np.newaxis],
+        'AD': np.load(f'{output_dir}test_AD_processed_pred_per_vertex.npy') - AD_ages[:, np.newaxis]
+    }
 
-    # Create a list to store all results for all regions and cognitive tests
     all_results = []
-    
-    # Create a dict to score all test scores for included subjects
     all_test_scores = {}
 
-    # Get the brain-age gaps for the AD and CN subjects
-    brain_age_gaps = {}
-    brain_age_gaps['CN'] = np.load(f'{output_dir}test_CN_processed_pred_per_vertex.npy') - CN_ages[:, np.newaxis]
-    brain_age_gaps['AD'] = np.load(f'{output_dir}test_AD_processed_pred_per_vertex.npy') - AD_ages[:, np.newaxis]
-
-    # Loop over the cognitive tests
+    # === Main loop ===
     for test in indices.keys():
-        
-        # Determine cohort from test name
-        cohort = test[-2:]  # 'CN' or 'AD'
-        test_name = test[:-3]  # e.g., 'MMSE' from 'MMSE_CN'
+        cohort = test[-2:]
+        test_name = test[:-3]
 
-        # Get the corresponding brain_age_gap data
+        # Match covariate test to this cohort
+        covariate_key = f"{covariate_test}_{cohort}" if covariate_test else None
+
+        # Skip covariate test itself
+        if covariate_key is not None and test == covariate_key:
+            continue
+
+        # Subject pool & ages for this cohort
         subject_list = CN_subjects if cohort == 'CN' else AD_subjects
+        all_chr_age = CN_ages if cohort == 'CN' else AD_ages
+
+        # Get base subjects and y
+        ordered_subjects = subject_list[indices[test]]
         y = brain_age_gaps[cohort][indices[test]]
 
-        # Get cognitive score data for these specific subjects (using subject_list[indices[test]])
-        ordered_subjects = subject_list[indices[test]]  # These are the subjects X is based on
-        matched_scores = cognitive_scores[cognitive_scores['subject_date'].isin(ordered_subjects)].copy()
+        # If covariate test is provided, filter to common subjects
+        if covariate_key is not None and covariate_key in indices:
+            cov_subjects = subject_list[indices[covariate_key]]
+            common_subjects = np.intersect1d(ordered_subjects, cov_subjects)
+            mask = np.isin(ordered_subjects, common_subjects)
+            y = y[mask]
+            ordered_subjects = ordered_subjects[mask]
+            chr_age = all_chr_age[indices[test]][mask]
+        else:
+            chr_age = all_chr_age[indices[test]]
 
-        # Make sure the subject_date is ordered the same as X
+        # Get matching cognitive data
+        matched_scores = cognitive_scores[cognitive_scores['subject_date'].isin(ordered_subjects)].copy()
         matched_scores['subject_date'] = pd.Categorical(
             matched_scores['subject_date'], categories=ordered_subjects, ordered=True
         )
-        matched_scores = matched_scores.sort_values('subject_date')
-        
-        # Remove duplicates (different scans with same metadata)
-        matched_scores = matched_scores.drop_duplicates('subject_date')
+        matched_scores = matched_scores.sort_values('subject_date').drop_duplicates('subject_date')
 
-        # Get the independent variables of the subjects
-        chr_age = CN_ages[indices[test]] if cohort == 'CN' else AD_ages[indices[test]] # aligns with brain_age_gaps
         sex = matched_scores['PTGENDER'].map({'Male': 0, 'Female': 1}).values
         education = matched_scores['PTEDUCAT'].values
         test_scores = matched_scores[test_name].values
 
-        # Invert the sign of the test scores if higher scores are associated with better performance
-        if test_relations[test[:-3]]: test_scores = -test_scores
+        if test_relations[test_name]:
+            test_scores = -test_scores
 
-        # Z-score normalize the test scores and education (sex is categorical)
+        # Z-score normalization
         education = (education - np.mean(education)) / np.std(education)
         test_scores = (test_scores - np.mean(test_scores)) / np.std(test_scores)
-        
+
         # Save the test scores
         all_test_scores[test] = test_scores
-        
-        # Create the collective X array
-        X = np.column_stack((sex, education, test_scores, chr_age))
-        X_df = pd.DataFrame(X, columns=['sex', 'education', 'test_score', 'chronological_age'])
 
-        assert len(X_df) == len(y) # verify shapes
+        # Add covariate scores if present
+        if covariate_key is not None and covariate_key in indices:
+            cov_name = covariate_key[:-3]
+            cov_scores = matched_scores[cov_name].values
+            if test_relations[cov_name]:
+                cov_scores = -cov_scores
+            cov_scores = (cov_scores - np.mean(cov_scores)) / np.std(cov_scores)
+            X = np.column_stack((sex, education, test_scores, cov_scores, chr_age))
+            X_df = pd.DataFrame(X, columns=['sex', 'education', 'test_score', 'covariate_score', 'chronological_age'])
+        else:
+            X = np.column_stack((sex, education, test_scores, chr_age))
+            X_df = pd.DataFrame(X, columns=['sex', 'education', 'test_score', 'chronological_age'])
 
-        # ======= Run regressions ======= #
+        assert len(X_df) == len(y)
 
-        if subset: # If using specific regions
-            
+        ### Downsample HERE ###
+
+        ### ###
+
+        # === Run regressions ===
+        if subset:
             for region in regions.keys():
-
                 if region == 'all':
-                    # Average the brain-age predictions across the vertices of the associated region
                     y_region = postprocess().avg_region_error(y, region)
-                    region_val = region
-                    hemi_val = None
+                    region_val, hemi_val = region, None
                 else:
-                    y_region = postprocess().avg_region_error(y, region[0], region[1]) # Format: [region, hemi]
-                    region_val = region[0]
-                    hemi_val = region[1]
-                    
-                # Regress the cognitive scores with BA, CA, sex, and education
-                cognitive_regression = sm.OLS(y_region, sm.add_constant(X_df)) # need to manually add constant for statsmodels
-                results = cognitive_regression.fit()
-                
-                # Append the results
+                    y_region = postprocess().avg_region_error(y, region[0], region[1])
+                    region_val, hemi_val = region[0], region[1]
+
+                results = sm.OLS(y_region, sm.add_constant(X_df)).fit()
                 all_results.append({
                     'cohort': cohort,
                     'test': test_name,
@@ -961,24 +950,16 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
                     'hemi': hemi_val,
                     'coef': results.params['test_score'],
                     'raw_pval': results.pvalues['test_score'],
-                    'r_squared' : results.rsquared,
+                    'r_squared': results.rsquared,
                     'is_inverted': test_relations[test_name]
                 })
-
-        else: # If using every region
-
-            _, names, _ = postprocess_obj.get_labels() # get the labels, etc.
+        else:
+            _, names, _ = postprocess_obj.get_labels()
             for region_name, hemi in names:
-
                 if region_name.lower() in ['unknown', 'medialwall']:
                     continue
-
-                # Average across the region, then regress
                 y_region = postprocess_obj.avg_region_error(y, region_name, hemi, mean='by_subject')
-                cognitive_regression = sm.OLS(y_region, sm.add_constant(X_df))
-                results = cognitive_regression.fit()
-
-                # Append the results
+                results = sm.OLS(y_region, sm.add_constant(X_df)).fit()
                 all_results.append({
                     'cohort': cohort,
                     'test': test_name,
@@ -987,89 +968,73 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
                     'hemi': hemi,
                     'coef': results.params['test_score'],
                     'raw_pval': results.pvalues['test_score'],
-                    'r_squared' : results.rsquared,
+                    'r_squared': results.rsquared,
                     'is_inverted': test_relations[test_name]
                 })
 
-
-    # Make the results into a dataframe
+    # === Post-processing results ===
+                
+    # Add nan for global/missing region
     all_results = pd.DataFrame(all_results)
-
     if regions is not None:
-        # Replace the regions with their colloquial names
         all_results['region'] = all_results['region'].map(regions).fillna(all_results['region'])
 
-    # Adjust p-values per-test and per-cohort
-    all_results['adj_pval'] = (
-        all_results
-        .groupby(['test', 'cohort'])['raw_pval']
-        .transform(lambda p: multipletests(p, alpha=0.05, method='fdr_bh')[1]))
-    
-    # Get the regional averages
+    # Get the region averages (across hemispheres)
     all_results['region_avg'] = (
         all_results.groupby(['cohort', 'region', 'test'])['coef']
-        .transform('mean'))
-        
-    if not get_beta_arrays: return all_results, all_test_scores
-    
-    # Get arrays for each cognitive test, populated per vertex
-    else:
-        
-        # Create a dict to hold all cognitive test arrays
-        all_cog_arrays = {}
+        .transform('mean')
+    )
 
-        # Get the names and labels
-        labels, names, _ = postprocess().get_labels()
+    # Adjust the pvalues
+    all_results['adj_pval'] = (
+        all_results.groupby(['test', 'cohort'], group_keys=False)['raw_pval']
+        .apply(lambda p: pd.Series(multipletests(p.values, alpha=0.05, method='fdr_bh')[1], index=p.index))
+    )
 
-        # Map region names (lowercase) -> label index, for both hemispheres combined
-        region_to_label_indices = {(name.lower(), hemi): i for i, 
-                                   (name, hemi) in enumerate(names)}
+    if not get_beta_arrays:
+        return all_results, all_test_scores
 
-        # Get a list of all cognitive tests
-        tests = all_results['test'].unique()
+    # === Optional: build beta arrays ===
+    all_cog_arrays = {}
+    labels, names, _ = postprocess().get_labels()
+    region_to_label_indices = {(name.lower(), hemi): i for i, (name, hemi) in enumerate(names)}
+    tests = all_results['test'].unique()
 
-        # Iterate through the test results
-        for cohort in ['CN', 'AD']:
-        
-            # Select the results for a given cohort
-            cohort_results = all_results[all_results['cohort'] == cohort]
+    for cohort in ['CN', 'AD']:
+        cohort_results = all_results[all_results['cohort'] == cohort]
+        for test_name in tests:
+            test_results = cohort_results[cohort_results['test'] == test_name]
+            if (test_results['coef'] == 0).all():
+                continue
+            region_values = {(row['region'].lower(), row.get('hemi', '')): row['coef']
+                             for _, row in test_results.iterrows()}
+            display_array = np.zeros_like(labels, dtype=np.float64)
+            for (region_name, hemi) in names:
+                region_key = (region_name.lower(), hemi)
+                if region_key in region_values:
 
-            # Iterate through the tests
-            for test_name in tests:
-            
-                # Select results for a given test
-                test_results = cohort_results[cohort_results['test'] == test_name] # select results for a given test
-                if (test_results['coef'] == 0).all(): continue # if all values = 0, skip this cognitive test
+                    # Build the filter mask
+                    filter_mask = (
+                        (all_results['region'].str.lower() == region_name.lower()) &
+                        (all_results['hemi'].str.lower() == hemi.lower()) &
+                        (all_results['cohort'].str.lower() == cohort.lower()) &
+                        (all_results['test'].str.lower() == test_name.lower())
+                    )
 
-                # Get the values for each region
-                region_values = {
-                    (row['region'].lower(), row.get('hemi', '')): row['coef']
-                    for _, row in test_results.iterrows()}
+                    # Select p-value based on mask_by argument
+                    if mask_by == 'adjusted':
+                        p = all_results.loc[filter_mask, 'adj_pval'].values[0]
+                    elif mask_by == 'raw':
+                        p = all_results.loc[filter_mask, 'raw_pval'].values[0]
+                    else:
+                        p = 0  # No masking
 
-                # Create an array of shape (n_vertices,) to display the values
-                display_array = np.zeros_like(labels, dtype=np.float64)
+                    # Apply mask if significant
+                    if p < 0.05:
+                        label_index = region_to_label_indices[region_key]
+                        display_array[labels == label_index] = region_values[region_key]
 
-                # Iterate over the region-hemisphere combinations, and re-populate vertices based on the label mean
-                for (region_name, hemi) in names:
-                    region_key = (region_name.lower(), hemi)
-                    if region_key in region_values:
-
-                        # Select the specific adjusted p value
-                        adj_p = all_results.loc[
-                            (all_results['region'].str.lower() == region_name.lower()) &
-                            (all_results['hemi'].str.lower() == hemi.lower()) &
-                            (all_results['cohort'].str.lower() == cohort.lower()) &
-                            (all_results['test'].str.lower() == test_name.lower()),
-                            'adj_pval'].values[0]
-
-                        # If significant, fill in the values
-                        if adj_p < 0.05:
-                            label_index = region_to_label_indices[region_key]
-                            display_array[labels == label_index] = region_values[region_key]
-
-                    # If the array is not just 0s
-                    if not np.all(display_array == 0): 
-                        all_cog_arrays[f'{test_name}_{cohort}'] = display_array
+                if not np.all(display_array == 0):
+                    all_cog_arrays[f'{test_name}_{cohort}'] = display_array
 
     return all_results, all_cog_arrays, all_test_scores
-    
