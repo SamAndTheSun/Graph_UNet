@@ -969,12 +969,10 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
                 })
 
     # === Post-processing results ===
-                
-    # Add nan for global/missing region
+    
+    # Make it a df
     all_results = pd.DataFrame(all_results)
-    if regions is not None:
-        all_results['region'] = all_results['region'].map(regions).fillna(all_results['region'])
-
+    
     # Get the region averages (across hemispheres)
     all_results['region_avg'] = (
         all_results.groupby(['cohort', 'region', 'test'])['coef']
@@ -985,11 +983,22 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
     try: all_results = all_results[all_results['region'] != 'Medial_wall']
     except KeyError: pass
 
-    # Adjust the pvalues
-    all_results['adj_pval'] = (
-        all_results.groupby(['test', 'cohort'], group_keys=False)['raw_pval']
-        .apply(lambda p: pd.Series(multipletests(p.values, alpha=0.05, method='fdr_bh')[1], index=p.index))
-    )
+    if region == 'all':  # Global AGs
+        all_results['adj_pval'] = (
+            all_results.groupby(['cohort'], group_keys=False)['raw_pval']
+            .apply(lambda p: pd.Series(
+                multipletests(p.values, alpha=0.05, method='fdr_bh')[1],
+                index=p.index
+            ))
+        )
+    else:  # Local AGs
+        all_results['adj_pval'] = (
+            all_results.groupby(['test', 'cohort'], group_keys=False)['raw_pval']
+            .apply(lambda p: pd.Series(
+                multipletests(p.values, alpha=0.05, method='fdr_bh')[1],
+                index=p.index
+            ))
+        )
 
     if not get_beta_arrays:
         return all_results, all_test_scores
