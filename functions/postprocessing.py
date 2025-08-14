@@ -951,16 +951,16 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
                 })
         else:
             _, names, _ = postprocess_obj.get_labels()
-            for region_name, hemi in names:
-                if region_name.lower() in ['unknown', 'medialwall']:
+            for region, hemi in names:
+                if region.lower() in ['unknown', 'medialwall']:
                     continue
-                y_region = postprocess_obj.avg_region_error(y, region_name, hemi, mean='by_subject')
+                y_region = postprocess_obj.avg_region_error(y, region, hemi, mean='by_subject')
                 results = sm.OLS(y_region, sm.add_constant(X_df)).fit()
                 all_results.append({
                     'cohort': cohort,
                     'test': test_name,
                     'test_n_subjects': f'{test_name}\n(n={len(y_region)})',
-                    'region': region_name,
+                    'region': region,
                     'hemi': hemi,
                     'coef': results.params['test_score'],
                     'raw_pval': results.pvalues['test_score'],
