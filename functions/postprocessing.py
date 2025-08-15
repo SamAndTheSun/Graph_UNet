@@ -1041,15 +1041,10 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
     # Drop the medial wall if present
     try: all_results = all_results[all_results['region'] != 'Medial_wall']
     except KeyError: pass
-
-    # Determine grouping columns
-    group_cols = ['test', 'cohort']  # default (local AGs)
-    if 'region' in locals() and region == 'all':
-        group_cols = ['cohort']  # global AGs
-
-    # Compute adjusted p-values
+    
+    # Adjust within each cohort
     all_results['adj_pval'] = (
-        all_results.groupby(group_cols, group_keys=False)['raw_pval']
+        all_results.groupby(['cohort'], group_keys=False)['raw_pval']
         .apply(lambda p: pd.Series(
             multipletests(p.values, alpha=0.05, method='fdr_bh')[1],
             index=p.index
