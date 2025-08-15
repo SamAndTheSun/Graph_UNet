@@ -471,26 +471,53 @@ class postprocess():
         if not hasattr(self, 'labels'):
             self.get_labels()
 
+        mask = np.zeros_like(self.labels, dtype=bool)
+
+        # Handle case: all vertices except medial wall
         if target_region == 'all':
-            mask = (self.labels != 0)  # Exclude medial wall
+            mask = (self.labels != 0)
+
+        # Handle case: multiple regions + multiple hemis
+        elif isinstance(target_region, list):
+            if not isinstance(hemi, list) or len(target_region) != len(hemi):
+                raise ValueError("If target_region is a list, hemi must be a list of the same length.")
+
+            for region_name, region_hemi in zip(target_region, hemi):
+                if region_hemi == 'both':
+                    for i, (name, hemi_label) in enumerate(self.names):
+                        if region_name.lower() in name.lower() and hemi_label in ['lh', 'rh']:
+                            mask |= (self.labels == i)
+                else:
+                    for i, (name, hemi_label) in enumerate(self.names):
+                        if region_name.lower() in name.lower() and region_hemi == hemi_label:
+                            mask |= (self.labels == i)
+
+        # Handle case: single region
         else:
-            if hemi == None:
-                raise Exception('Error: Hemisphere must be included for local error compuation')
-            mask = np.zeros_like(self.labels, dtype=bool)
-            for i, (name, region_hemi) in enumerate(self.names):
-                if target_region.lower() in name.lower() and hemi == region_hemi:
-                    mask |= (self.labels == i)
+            if hemi is None:
+                raise Exception('Error: Hemisphere must be included for local error computation')
 
+            if hemi == 'both':
+                for i, (name, hemi_label) in enumerate(self.names):
+                    if target_region.lower() in name.lower() and hemi_label in ['lh', 'rh']:
+                        mask |= (self.labels == i)
+            else:
+                for i, (name, hemi_label) in enumerate(self.names):
+                    if target_region.lower() in name.lower() and hemi == hemi_label:
+                        mask |= (self.labels == i)
+
+        # Error if nothing matched
         if not np.any(mask):
-            raise ValueError(f"No vertices found for region '{target_region}' in hemisphere '{hemi}'")
+            raise ValueError(f"No vertices found for region(s) '{target_region}' with hemi '{hemi}'")
 
+        # Return the requested average
         if mean == 'by_subject':
             return np.mean(value_per_vertex_subject[:, mask], axis=1)
         elif mean == 'by_vertice':
             return np.mean(value_per_vertex_subject[:, mask], axis=0)
         else:
             raise ValueError(f"Unknown mean method: {mean}")
-    
+        
     # Regress anatomical qualities (from testing data) against age gap
     def regress_region(self, X_test, error_per_vertex, groups_dict=None, target_region='G_oc-temp_med-Parahip', 
                     feature_order=['area','curvature','sulcal_depth', 'thickness', 'white_gray_matter_intensity_ratio']): # used for all files; avoid -
@@ -796,8 +823,9 @@ def show_ranked_differences(suffix, output_dir):
 
 # Function for regressing through cognitive scores
 def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
-                      subset=True, regions=None, postprocess_obj=None, 
-                      covariate_test=None, get_beta_arrays=False,
+                      subset=True, regions=None, partial_region_names=False,
+                      postprocess_obj=None, covariate_test=None, 
+                      get_beta_arrays=False,
                       mask_by='adjusted', pval_thresh=0.05):
 
     # === Prep the cognitive scores ===
@@ -929,26 +957,57 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
 
         # === Run regressions ===
         if subset:
-            for region in regions.keys():
-                if region == 'all':
-                    y_region = postprocess().avg_region_error(y, region)
-                    region_val, hemi_val = region, None
-                else:
-                    y_region = postprocess().avg_region_error(y, region[0], region[1])
-                    region_val, hemi_val = region[0], region[1]
+            if partial_region_names:
+                _, names, _ = postprocess_obj.get_labels() # Get all regions
+                for partial_region in regions: # Iterate over all partial regions we are interested in
+                    matched_regions = []
+                    matched_hemispheres = []
+                    for full_region, hemi in names: # Iterate over all formal regions
+                        if partial_region[0].lower() in full_region.lower(): # Identify if the partial region is in the full region
+                            if (partial_region[1] == 'both') or (partial_region[1] == hemi):
+                                matched_regions.append(full_region)
+                                matched_hemispheres.append(hemi)
 
-                results = sm.OLS(y_region, sm.add_constant(X_df)).fit()
-                all_results.append({
-                    'cohort': cohort,
-                    'test': test_name,
-                    'test_n_subjects': f'{test_name}\n(n={len(y_region)})',
-                    'region': region_val,
-                    'hemi': hemi_val,
-                    'coef': results.params['test_score'],
-                    'raw_pval': results.pvalues['test_score'],
-                    'r_squared': results.rsquared,
-                    'is_inverted': test_relations[test_name]
-                })
+                    # Get the average for the entire region
+                    y_region = postprocess().avg_region_error(y, matched_regions, matched_hemispheres)
+                    results = sm.OLS(y_region, sm.add_constant(X_df)).fit()
+                    all_results.append({
+                        'cohort': cohort,
+                        'test': test_name,
+                        'test_n_subjects': f'{test_name}\n(n={len(y_region)})',
+                        'region': partial_region[0],
+                        'hemi': partial_region[1],
+                        'coef': results.params['test_score'],
+                        'raw_pval': results.pvalues['test_score'],
+                        'r_squared': results.rsquared,
+                        'is_inverted': test_relations[test_name]
+                    })
+
+            else:
+                for region in regions:
+                    if region == 'all':
+                        y_region = postprocess().avg_region_error(y, region)
+                        region_val, hemi_val = region, None
+                    elif region[1] == 'both':
+                        y_region = postprocess().avg_region_error(y, region[0], 'both')
+                        region_val, hemi_val = region[0], region[1]
+                    else:
+                        y_region = postprocess().avg_region_error(y, region[0], region[1])
+                        region_val, hemi_val = region[0], region[1]
+
+                    results = sm.OLS(y_region, sm.add_constant(X_df)).fit()
+                    all_results.append({
+                        'cohort': cohort,
+                        'test': test_name,
+                        'test_n_subjects': f'{test_name}\n(n={len(y_region)})',
+                        'region': region_val,
+                        'hemi': hemi_val,
+                        'coef': results.params['test_score'],
+                        'raw_pval': results.pvalues['test_score'],
+                        'r_squared': results.rsquared,
+                        'is_inverted': test_relations[test_name]
+                    })
+            
         else:
             _, names, _ = postprocess_obj.get_labels()
             for region, hemi in names:
@@ -983,22 +1042,19 @@ def regress_cognitive(data_dir, output_dir, cog_path, test_relations,
     try: all_results = all_results[all_results['region'] != 'Medial_wall']
     except KeyError: pass
 
-    if region == 'all':  # Global AGs
-        all_results['adj_pval'] = (
-            all_results.groupby(['cohort'], group_keys=False)['raw_pval']
-            .apply(lambda p: pd.Series(
-                multipletests(p.values, alpha=0.05, method='fdr_bh')[1],
-                index=p.index
-            ))
-        )
-    else:  # Local AGs
-        all_results['adj_pval'] = (
-            all_results.groupby(['test', 'cohort'], group_keys=False)['raw_pval']
-            .apply(lambda p: pd.Series(
-                multipletests(p.values, alpha=0.05, method='fdr_bh')[1],
-                index=p.index
-            ))
-        )
+    # Determine grouping columns
+    group_cols = ['test', 'cohort']  # default (local AGs)
+    if 'region' in locals() and region == 'all':
+        group_cols = ['cohort']  # global AGs
+
+    # Compute adjusted p-values
+    all_results['adj_pval'] = (
+        all_results.groupby(group_cols, group_keys=False)['raw_pval']
+        .apply(lambda p: pd.Series(
+            multipletests(p.values, alpha=0.05, method='fdr_bh')[1],
+            index=p.index
+        ))
+    )
 
     if not get_beta_arrays:
         return all_results, all_test_scores

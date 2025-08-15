@@ -235,7 +235,7 @@ def compare_cohorts(suffix, cohort_pred, cohort_ref, mask=None, mask_split=None,
 
     return ME_cohort_pred, ME_cohort_ref
 
-def bold_significant_bars(df, ax, y_axis, hue, hue_order, special_case=False):
+def bold_significant_bars(df, ax, y_axis, hue, hue_order, pval_thresh = 0.05, special_case=False):
         
     # Get the test names from the axis
     test_names = [tick.get_text() for tick in ax.get_yticklabels()]
@@ -248,7 +248,7 @@ def bold_significant_bars(df, ax, y_axis, hue, hue_order, special_case=False):
     if special_case:
         
         # Determine if special case is significant
-        if pmap.get((test_names[-1], hue_order[-1]), 1.0) < 0.05:
+        if pmap.get((test_names[-1], hue_order[-1]), 1.0) < pval_thresh:
             add_sig = True
             
         # Remove the special case
@@ -265,7 +265,7 @@ def bold_significant_bars(df, ax, y_axis, hue, hue_order, special_case=False):
         for test in test_names:
                         
             # Determine if the corresponding test/region combination if significant
-            if pmap.get((test, region), 1.0) < 0.05:
+            if pmap.get((test, region), 1.0) < pval_thresh:
                 sig.append(True)
             else:
                 sig.append(False) 
