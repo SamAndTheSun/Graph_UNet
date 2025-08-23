@@ -85,7 +85,7 @@ for ico in all_vertices.keys():
             # include the source node
             corresponding_values = np.concatenate((corresponding_values, [index]))
             # if the node has 5 neighbors; should be 12 of these
-            if corresponding_values.shape == (6,): # we assume that the learned weights will offset the bias of adding the source twice
+            if corresponding_values.shape == (6,):
                 corresponding_values = np.concatenate((corresponding_values, [index]))
             receptive_field[index, :] = corresponding_values
 

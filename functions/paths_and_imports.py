@@ -58,12 +58,12 @@ cog_path = '/mnt/md0/tempFolder/samAnderson/datasets/ADNI_cognitive_scores.csv'
 
 # Paths for training data
 
-X_pretrain = f'{data_dir}X_pretrain.npy'
-y_pretrain = f'{data_dir}y_pretrain.npy'
-
 X_train = f'{data_dir}X_train.npy'
 y_train = f'{data_dir}y_train.npy'
 sex_train = f'{data_dir}sex_train.npy'
+
+X_5cv = f'{data_dir}X_train_unique_subjects.npy'
+y_5cv = f'{data_dir}y_train_unique_subjects.npy'
 
 X_test_CN = f'{data_dir}X_ADNI_CN.npy'
 y_test_CN = f'{data_dir}y_ADNI_CN.npy'

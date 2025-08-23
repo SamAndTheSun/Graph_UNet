@@ -131,6 +131,7 @@ class postprocess():
         smoothed_pred = pred_per_vertex.copy()
         for _ in range(n_iter):
             smoothed_pred = smoothed_pred @ smoothing_op.T
+        
 
         # Outputs
         vertex_means = np.mean(smoothed_pred, axis=1)

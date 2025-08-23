@@ -1,12 +1,12 @@
 from paths_and_imports import *
 
-def test_model(X_test, y_test, model, mask, suffix, test_size=8):
+def test_model(X_test, y_test, model, suffix, mask=None, test_size=8):
 
     avg_mae, per_node_e, chr_ages, age_gaps, pred_per_vertex = run_model(None, None, X_test, y_test, model=model,
                         mask=mask, batch_size=test_size, batch_load=test_size, n_epochs=1, lr=lr, 
-                        print_every=print_every, ico_levels=[6, 5, 4], first=first, intra_w=intra_w, 
-                        global_w=global_w, weight_decay=weight_decay, feature_scale=1, 
-                        dropout_levels=dropout_levels, verbose=False)
+                        criterion='variance_and_mae', print_every=print_every, ico_levels=[6, 5, 4], 
+                        first=first, intra_w=intra_w,  global_w=global_w, weight_decay=weight_decay, 
+                        feature_scale=1, dropout_levels=dropout_levels, verbose=False)
 
     # Save the outputted values
     np.save(f'{output_dir}{suffix}_avg_mae.npy', avg_mae)
@@ -53,7 +53,9 @@ def postprocess_model(suffix, factors=None, abs_limits=None, global_limits=20):
     plt.tight_layout()  # Adjust layout to prevent overlap
     return
 
-def compare_cohorts(suffix, cohort_pred, cohort_ref, mask=None, mask_split=None, abs_limits=None, n_bootstrap=500):  # pred - ref
+def compare_cohorts(suffix, cohort_pred, cohort_ref, mask=None, 
+                    mask_split=None, abs_limits=None, n_bootstrap=500,
+                    medial_labels={'Medial_wall', 'Unknown', '???'}):  # pred - ref
     
     # Define the postprocessing object
     p = postprocess(suffix=suffix)
@@ -133,11 +135,12 @@ def compare_cohorts(suffix, cohort_pred, cohort_ref, mask=None, mask_split=None,
     # Collect stats
     region_stats_df = []
     for label_id in unique_labels:
-        if label_id == 0:
-            continue  # Skip medial wall
 
         mask = labels == label_id
         region_name, hemi = names[label_id]
+
+        # Skip medial wall
+        if region_name in medial_labels: continue
 
         # Conduct the t-test and get the age gap for the region
         t_test = ttest_ind(ME_cohort_pred[mask], ME_cohort_ref[mask])

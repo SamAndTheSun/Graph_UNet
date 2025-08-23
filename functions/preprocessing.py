@@ -475,50 +475,6 @@ del X_train, X_train_standardized, y_train, sex_train, subjects_train
 
 # ======================================================================================================= #
 
-mean = np.load(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/mean_train.npy')
-std = np.load(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/std_train.npy')
-
-# Get the processed pre-training data
-pretraining_datasets = [f'AOMIC_ID1000_ico{ico}_all/', f'SLIM_ico{ico}_all/']
-
-X_AOMIC_ID1000, y_AOMIC_ID1000, sex_AOMIC_ID1000, damaged_subjects_AOMIC_ID1000, subjects_AOMIC_ID1000 = make_npy(dataset_dir=f'{raw_data_dir}{pretraining_datasets[0]}',  
-              metadata_path='/mnt/md0/tempFolder/samAnderson/datasets/aomic_id1000_master.csv',
-              file_suffixes = file_suffixes,
-              age_id_date_sex=['age', 'participant_id', None, 'sex'],
-              first_hemi='rh', dataset='AOMIC_ID1000', sex_mapping={'female':'Female','male':'Male'})
-
-X_SLIM, y_SLIM, sex_SLIM, damaged_subjects_SLIM, subjects_SLIM = make_npy(dataset_dir=f'{raw_data_dir}{pretraining_datasets[1]}', 
-              metadata_path='/mnt/md0/tempFolder/samAnderson/datasets/SLIM_master.csv',
-              file_suffixes = file_suffixes,
-              age_id_date_sex=['Age', 'ID', 'Date', 'Sex'],
-              first_hemi='rh', dataset='SLIM', sex_mapping={'female':'Female','male':'Male'})
-
-# Standardize the pretraining set using the training stats
-X_pretrain = np.concatenate([X_AOMIC_ID1000, X_SLIM], axis=0)
-y_pretrain = np.concatenate([y_AOMIC_ID1000, y_SLIM])
-sex_pretrain = np.concatenate([sex_AOMIC_ID1000, sex_SLIM])
-subjects_pretrain = np.concatenate([subjects_AOMIC_ID1000, subjects_SLIM])
-
-# Save memory
-del X_AOMIC_ID1000, y_AOMIC_ID1000, sex_AOMIC_ID1000, damaged_subjects_AOMIC_ID1000, subjects_AOMIC_ID1000
-del X_SLIM, y_SLIM, sex_SLIM, damaged_subjects_SLIM, subjects_SLIM
-
-# Standardize the pretraining using the training statistics
-X_pretrain_standardized = (X_pretrain - mean) / std
-
-print(X_pretrain_standardized.shape)
-print(y_pretrain.shape)
-#
-np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/X_pretrain', X_pretrain_standardized)
-np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/y_pretrain', y_pretrain)
-np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/sex_pretrain', sex_pretrain)
-np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/subjects_pretrain', subjects_pretrain)
-
-# Save memory
-del X_pretrain, X_pretrain_standardized, y_pretrain, sex_pretrain, subjects_pretrain
-
-# ======================================================================================================= #
-
 # Get the processed testing data
 testing_datasets = [f'ADNI_ico{ico}_all/']
 
@@ -553,3 +509,81 @@ np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/
 np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/sex_ADNI_AD', sex_ADNI_AD)
 np.save(f'/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/subjects_ADNI_AD', subjects_ADNI_AD)
 """
+
+# ======================================================================================================= #
+
+# Get the processed training data
+training_datasets = [f'UKBB_ico{ico}_all_pruned/', f'NACC_ico{ico}_all/', f'IXI_ico{ico}_all/']
+
+X_UKBB, y_UKBB, sex_UKBB, damaged_subjects_UKBB, subjects_UKBB = make_npy(
+    dataset_dir=f'{raw_data_dir}{training_datasets[0]}', 
+    metadata_path='/mnt/md0/tempFolder/samAnderson/datasets/UKBB_demographic_with_sex.csv',
+    file_suffixes=file_suffixes,
+    age_id_date_sex=['age', 'eid', 'date', 'sex'],
+    first_hemi='rh', dataset='UKBB', sex_mapping={'0':'Female', '1':'Male'}
+)
+
+X_NACC, y_NACC, sex_NACC, damaged_subjects_NACC, subjects_NACC = make_npy(
+    dataset_dir=f'{raw_data_dir}{training_datasets[1]}',  
+    metadata_path='/mnt/md0/tempFolder/samAnderson/datasets/NACC_master.csv',
+    file_suffixes=file_suffixes,
+    age_id_date_sex=['age', 'ID', 'study_time', 'sex'],
+    first_hemi='rh', dataset='NACC', sex_mapping={'Female':'Female', 'Male':'Male'}
+)
+
+X_IXI, y_IXI, sex_IXI, damaged_subjects_IXI, subjects_IXI = make_npy(
+    dataset_dir=f'{raw_data_dir}{training_datasets[2]}', 
+    metadata_path='/mnt/md0/tempFolder/samAnderson/datasets/IXI_master.csv',
+    file_suffixes=file_suffixes,
+    age_id_date_sex=['AGE', 'IXI_ID', 'STUDY_DATE', 'SEX_ID (1=m, 2=f)'],
+    first_hemi='rh', dataset='IXI', sex_mapping={'2':'Female', '1':'Male'}
+)
+
+# Concatenate all datasets
+X_all   = np.concatenate([X_UKBB, X_NACC, X_IXI], axis=0)
+y_all   = np.concatenate([y_UKBB, y_NACC, y_IXI])
+sex_all = np.concatenate([sex_UKBB, sex_NACC, sex_IXI])
+subjects_all = np.concatenate([subjects_UKBB, subjects_NACC, subjects_IXI])
+
+# Save memory
+del X_UKBB, y_UKBB, sex_UKBB, damaged_subjects_UKBB, subjects_UKBB
+del X_NACC, y_NACC, sex_NACC, damaged_subjects_NACC, subjects_NACC
+del X_IXI, y_IXI, sex_IXI, damaged_subjects_IXI, subjects_IXI
+
+# --- Keep only one random timepoint per subject ---
+subject_names = np.array([s.rsplit('_', 1)[0] for s in subjects_all])
+
+# Get unique subjects
+unique_subjects = np.unique(subject_names)
+
+keep_idx_list = []
+for subj in unique_subjects:
+    subj_idx = np.where(subject_names == subj)[0]
+    chosen_idx = np.random.choice(subj_idx, size=1)  # pick one randomly
+    keep_idx_list.append(chosen_idx[0])
+
+keep_idx = np.array(keep_idx_list)
+
+# Filter arrays
+X_train_unique_subjects = X_all[keep_idx]
+y_train_unique_subjects = y_all[keep_idx]
+sex_train_unique_subjects = sex_all[keep_idx]
+subjects_train_unique_subjects = subjects_all[keep_idx]
+
+print(f"Kept {len(subjects_train_unique_subjects)} of {len(subjects_all)} scans after randomly selecting one timepoint per subject.")
+
+# Standardize features
+mean = np.mean(X_train_unique_subjects, axis=(0, 1), keepdims=True)  # shape (1, 1, features)
+std  = np.std(X_train_unique_subjects,  axis=(0, 1), keepdims=True)  # shape (1, 1, features)
+std_safe = np.where(std == 0, 1.0, std)
+X_train_standardized_unique_subjects = (X_train_unique_subjects - mean) / std_safe
+
+# Save
+np.save('/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/X_train_unique_subjects', X_train_standardized_unique_subjects)
+np.save('/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/y_train_unique_subjects', y_train_unique_subjects)
+np.save('/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/sex_train_unique_subjects', sex_train_unique_subjects)
+np.save('/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/datasets/processed/subjects_train_unique_subjects', subjects_train_unique_subjects)
+
+# Save memory
+del X_all, y_all, sex_all, subjects_all
+del X_train_unique_subjects, X_train_standardized_unique_subjects, y_train_unique_subjects, sex_train_unique_subjects, subjects_train_unique_subjects
