@@ -52,7 +52,7 @@ def set_seed(seed):
 def run_model(X_train, y_train, X_test, y_test, model=None, mask=None,
               batch_size=32, batch_load=1, n_epochs=100, lr=0.0001, print_every=10, 
               pooling_path='/mnt/md0/tempFolder/samAnderson/gnn_model/unet-gnn/pooling/',
-              ico_levels=[6, 5, 4], criterion='variance_and_mae', weight_decay=0.01, 
+              ico_levels=[6, 5, 4], criterion='mae', weight_decay=0.01, 
               first='rh', intra_w=0, global_w=0, feature_scale=1, dropout_levels=[0.5, 0.5],
               verbose=True):
     """
